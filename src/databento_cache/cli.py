@@ -503,6 +503,94 @@ def verify(
         console.print("\n[dim]Run with --fix to remove stale metadata[/dim]")
 
 
+DATASETS: dict[str, str] = {
+    "GLBX.MDP3": "CME Globex futures and options",
+    "OPRA.PILLAR": "US options (all exchanges)",
+    "IFEU.IMPACT": "ICE Futures Europe",
+    "IFUS.IMPACT": "ICE Futures US",
+    "NDEX.IMPACT": "Nodal Exchange power futures",
+    "XEUR.EOBI": "Eurex fixed income and index derivatives",
+    "DBEQ.BASIC": "Databento consolidated US equities",
+    "XNAS.ITCH": "NASDAQ TotalView equities",
+    "XNYS.PILLAR": "NYSE equities",
+    "ARCX.PILLAR": "NYSE Arca equities",
+    "XBOS.ITCH": "NASDAQ Boston equities",
+    "BATS.PITCH": "CBOE BZX equities",
+    "BATY.PITCH": "CBOE BYX equities",
+    "EDGA.PITCH": "CBOE EDGA equities",
+    "EDGX.PITCH": "CBOE EDGX equities",
+    "IEXG.TOPS": "IEX exchange equities",
+    "MEMX.MEMOIR": "MEMX exchange equities",
+    "XASE.PILLAR": "NYSE American equities",
+    "XCHI.PILLAR": "NYSE Chicago equities",
+    "XNAS.BASIC": "NASDAQ equities (basic)",
+    "XPSX.ITCH": "NASDAQ PSX equities",
+}
+
+SCHEMAS: dict[str, str] = {
+    "trades": "Trade messages - executed trades",
+    "ohlcv-1m": "OHLCV bars - 1-minute",
+    "ohlcv-1h": "OHLCV bars - 1-hour",
+    "ohlcv-1d": "OHLCV bars - daily",
+    "ohlcv-1s": "OHLCV bars - 1-second",
+    "mbp-1": "Market by price - top of book (L1)",
+    "mbp-10": "Market by price - top 10 levels (L2)",
+    "mbo": "Market by order - full order book",
+    "tbbo": "Top of book BBO - best bid/offer",
+    "bbo-1s": "BBO snapshots - 1-second intervals",
+    "bbo-1m": "BBO snapshots - 1-minute intervals",
+    "definition": "Instrument definitions and contract specs",
+    "statistics": "Market statistics (open interest, settlement)",
+    "status": "Trading status updates",
+}
+
+
+@main.command()
+def datasets() -> None:
+    """List available Databento datasets."""
+    for ds, desc in DATASETS.items():
+        console.print(f"[cyan]{ds:<16}[/cyan] {desc}")
+
+
+@main.command()
+def schemas() -> None:
+    """List available data schemas."""
+    for schema, desc in SCHEMAS.items():
+        console.print(f"[cyan]{schema:<12}[/cyan] {desc}")
+
+
+@main.command()
+def symbols() -> None:
+    """Show symbol format examples for futures."""
+    console.print("[bold]Continuous Futures[/bold] (auto-rolling)")
+    console.print("  [cyan]ES.c.0[/cyan]   Front-month E-mini S&P 500 (calendar roll)")
+    console.print("  [cyan]ES.c.1[/cyan]   Second-month continuous")
+    console.print("  [cyan]ES.c.2[/cyan]   Third-month continuous")
+    console.print(
+        "  [yellow]ES.v.0[/yellow]   Volume-based roll [dim](has look-ahead bias)[/dim]"
+    )
+    console.print(
+        "  [yellow]ES.n.0[/yellow]   Open interest roll"
+        " [dim](has look-ahead bias)[/dim]"
+    )
+    console.print()
+    console.print("[bold]Parent Symbols[/bold] (all contracts)")
+    console.print("  [cyan]ES.FUT[/cyan]  All E-mini S&P 500 futures")
+    console.print("  [cyan]NQ.FUT[/cyan]  All E-mini NASDAQ-100 futures")
+    console.print("  [cyan]CL.FUT[/cyan]  All Crude Oil futures")
+    console.print()
+    console.print("[bold]Specific Contracts[/bold]")
+    console.print("  [cyan]ESZ24[/cyan]   E-mini S&P 500 Dec 2024")
+    console.print("  [cyan]ESH25[/cyan]   E-mini S&P 500 Mar 2025")
+    console.print("  [cyan]NQM25[/cyan]   E-mini NASDAQ-100 Jun 2025")
+    console.print()
+    console.print("[bold]Month Codes[/bold]")
+    console.print(
+        "  F=Jan  G=Feb  H=Mar  J=Apr  K=May  M=Jun  "
+        "N=Jul  Q=Aug  U=Sep  V=Oct  X=Nov  Z=Dec"
+    )
+
+
 @main.command()
 @click.argument("symbol")
 @click.option("--schema", "-s", default=None, help="Data schema (optional)")
