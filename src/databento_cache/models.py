@@ -1,9 +1,44 @@
+from dataclasses import dataclass
 from datetime import date, datetime
+from enum import Enum, auto
 from pathlib import Path
 
 import pandas as pd
 import polars as pl
 from pydantic import BaseModel, Field
+
+
+class DownloadStatus(Enum):
+    """Status of a partition download."""
+
+    DOWNLOADING = auto()
+    COMPLETED = auto()
+
+
+@dataclass
+class PartitionInfo:
+    """Information about a single partition."""
+
+    year: int
+    month: int
+    day: int | None = None
+
+    @property
+    def label(self) -> str:
+        """Human-readable label for this partition."""
+        if self.day is not None:
+            return f"{self.year}-{self.month:02d}-{self.day:02d}"
+        return f"{self.year}-{self.month:02d}"
+
+
+@dataclass
+class DownloadProgress:
+    """Progress update yielded during download."""
+
+    status: DownloadStatus
+    partition: PartitionInfo
+    current: int
+    total: int
 
 
 class DateRange(BaseModel):

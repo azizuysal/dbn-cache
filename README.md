@@ -27,6 +27,10 @@ export DATABENTO_CACHE_DIR=/path/to/cache
 ## CLI Usage
 
 ```bash
+# Show help
+databento-cache -h
+databento-cache download -h
+
 # Download E-mini S&P 500 continuous futures (1-minute OHLCV)
 databento-cache download ES.c.0 --schema ohlcv-1m --start 2024-01-01 --end 2024-12-01
 
@@ -42,6 +46,11 @@ databento-cache info ES.c.0 --schema ohlcv-1m
 # Estimate cost before downloading
 databento-cache cost ES.c.0 --schema trades --start 2024-01-01 --end 2024-12-01
 ```
+
+## Cancellation & Error Handling
+
+- Press `Ctrl+C` to cancel gracefully; partial downloads are saved and can be resumed
+- All errors are caught and displayed with clear messages (no unhandled exceptions)
 
 ## Library Usage
 

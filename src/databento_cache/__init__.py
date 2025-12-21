@@ -2,8 +2,15 @@
 
 from .cache import DataCache
 from .client import DatabentoClient
-from .exceptions import CacheMissError, PartialCacheError
-from .models import CachedData, CachedDataInfo, DateRange
+from .exceptions import CacheMissError, DownloadCancelledError, PartialCacheError
+from .models import (
+    CachedData,
+    CachedDataInfo,
+    DateRange,
+    DownloadProgress,
+    DownloadStatus,
+    PartitionInfo,
+)
 
 __all__ = [
     "CachedData",
@@ -12,5 +19,9 @@ __all__ = [
     "DatabentoClient",
     "DataCache",
     "DateRange",
+    "DownloadCancelledError",
+    "DownloadProgress",
+    "DownloadStatus",
     "PartialCacheError",
+    "PartitionInfo",
 ]

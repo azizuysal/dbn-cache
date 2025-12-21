@@ -1,6 +1,6 @@
 [project]
 name = "databento-cache"
-version = "0.1.0"
+version = "1.0.0"
 description = "Download and cache historical market data from Databento"
 requires-python = ">=3.13"
 dependencies = [
@@ -11,18 +11,14 @@ dependencies = [
     "click>=8.0",
     "pydantic>=2.0",
     "filelock>=3.0",
+    "rich>=13.0",
 ]
 
 [project.scripts]
 databento-cache = "databento_cache.cli:main"
 
 [dependency-groups]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.8",
-    "pyright>=1.1",
-    "pandas-stubs>=2.0",
-]
+dev = ["pytest>=8.0", "ruff>=0.8", "pyright>=1.1", "pandas-stubs>=2.0"]
 
 [build-system]
 requires = ["hatchling"]

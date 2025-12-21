@@ -11,8 +11,16 @@ from typing import TYPE_CHECKING
 from filelock import FileLock
 
 from .client import DatabentoClient
-from .exceptions import CacheMissError
-from .models import CachedData, CachedDataInfo, DateRange, SymbolMeta
+from .exceptions import CacheMissError, DownloadCancelledError
+from .models import (
+    CachedData,
+    CachedDataInfo,
+    DateRange,
+    DownloadProgress,
+    DownloadStatus,
+    PartitionInfo,
+    SymbolMeta,
+)
 from .utils import (
     detect_stype,
     find_missing_date_ranges,
@@ -27,7 +35,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +168,56 @@ class DataCache:
 
         return files
 
+    def _count_partitions_to_download(
+        self,
+        schema: str,
+        missing: list[DateRange],
+        base_path: Path,
+    ) -> tuple[int, list[tuple[PartitionInfo, Path, date, date]]]:
+        """Count partitions that need downloading and build download list.
+
+        Returns:
+            Tuple of (total count, list of partition download info).
+        """
+        partitions: list[tuple[PartitionInfo, Path, date, date]] = []
+
+        for gap in missing:
+            if is_tick_schema(schema):
+                for d in iter_days(gap.start, gap.end):
+                    dest = get_partition_path(base_path, schema, d.year, d.month, d.day)
+                    if not dest.exists():
+                        info = PartitionInfo(year=d.year, month=d.month, day=d.day)
+                        partitions.append((info, dest, d, d))
+            else:
+                for year, month in iter_months(gap.start, gap.end):
+                    dest = get_partition_path(base_path, schema, year, month)
+                    if not dest.exists():
+                        m_start, m_end = month_start_end(year, month)
+                        dl_start = max(m_start, gap.start)
+                        dl_end = min(m_end, gap.end)
+                        info = PartitionInfo(year=year, month=month)
+                        partitions.append((info, dest, dl_start, dl_end))
+
+        return len(partitions), partitions
+
+    def _save_incremental_meta(
+        self,
+        dataset: str,
+        symbol: str,
+        schema: str,
+        cached_ranges: list[DateRange],
+    ) -> None:
+        """Save metadata with current progress."""
+        new_meta = SymbolMeta(
+            dataset=dataset,
+            symbol=symbol,
+            stype=detect_stype(symbol),
+            schema=schema,
+            ranges=self._merge_ranges(cached_ranges),
+            updated_at=datetime.now(),
+        )
+        self._save_meta(new_meta)
+
     def download(
         self,
         symbol: str,
@@ -167,6 +225,8 @@ class DataCache:
         start: date,
         end: date,
         dataset: str = "GLBX.MDP3",
+        on_progress: "Callable[[DownloadProgress], None] | None" = None,
+        cancelled: "Callable[[], bool] | None" = None,
     ) -> CachedData:
         """Download data and cache it.
 
@@ -176,9 +236,14 @@ class DataCache:
             start: Start date (inclusive)
             end: End date (inclusive)
             dataset: Databento dataset
+            on_progress: Optional callback for progress updates
+            cancelled: Optional callable that returns True if download should stop
 
         Returns:
             CachedData wrapper for the downloaded files.
+
+        Raises:
+            DownloadCancelledError: If download was cancelled via the cancelled callback
         """
         if ".v." in symbol or ".n." in symbol:
             logger.warning(
@@ -191,65 +256,65 @@ class DataCache:
 
         with self._lock(dataset, symbol, schema):
             meta = self._load_meta(dataset, symbol, schema)
-            cached_ranges = meta.ranges if meta else []
+            cached_ranges = list(meta.ranges) if meta else []
             missing = self._find_missing_ranges(start, end, cached_ranges)
 
             if not missing:
                 files = self._get_cached_files(dataset, symbol, schema, start, end)
                 return CachedData(files)
 
-            for gap in missing:
-                if is_tick_schema(schema):
-                    for d in iter_days(gap.start, gap.end):
-                        dest = get_partition_path(
-                            base_path, schema, d.year, d.month, d.day
-                        )
-                        if not dest.exists():
-                            with tempfile.NamedTemporaryFile(
-                                delete=False, suffix=".parquet"
-                            ) as tmp:
-                                tmp_path = Path(tmp.name)
-                            try:
-                                self._download_partition(
-                                    symbol, schema, d, d, dataset, tmp_path
-                                )
-                                dest.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.move(tmp_path, dest)
-                            except Exception:
-                                tmp_path.unlink(missing_ok=True)
-                                raise
-                else:
-                    for year, month in iter_months(gap.start, gap.end):
-                        dest = get_partition_path(base_path, schema, year, month)
-                        if not dest.exists():
-                            month_start, month_end = month_start_end(year, month)
-                            dl_start = max(month_start, gap.start)
-                            dl_end = min(month_end, gap.end)
-                            with tempfile.NamedTemporaryFile(
-                                delete=False, suffix=".parquet"
-                            ) as tmp:
-                                tmp_path = Path(tmp.name)
-                            try:
-                                self._download_partition(
-                                    symbol, schema, dl_start, dl_end, dataset, tmp_path
-                                )
-                                dest.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.move(tmp_path, dest)
-                            except Exception:
-                                tmp_path.unlink(missing_ok=True)
-                                raise
-
-                cached_ranges.append(gap)
-
-            new_meta = SymbolMeta(
-                dataset=dataset,
-                symbol=symbol,
-                stype=detect_stype(symbol),
-                schema=schema,
-                ranges=self._merge_ranges(cached_ranges),
-                updated_at=datetime.now(),
+            total, partitions = self._count_partitions_to_download(
+                schema, missing, base_path
             )
-            self._save_meta(new_meta)
+
+            if total == 0:
+                files = self._get_cached_files(dataset, symbol, schema, start, end)
+                return CachedData(files)
+
+            completed_ranges: list[DateRange] = list(cached_ranges)
+
+            for current, (partition_info, dest, dl_start, dl_end) in enumerate(
+                partitions, start=1
+            ):
+                if on_progress:
+                    on_progress(
+                        DownloadProgress(
+                            status=DownloadStatus.DOWNLOADING,
+                            partition=partition_info,
+                            current=current,
+                            total=total,
+                        )
+                    )
+
+                with tempfile.NamedTemporaryFile(
+                    delete=False, suffix=".parquet"
+                ) as tmp:
+                    tmp_path = Path(tmp.name)
+                try:
+                    self._download_partition(
+                        symbol, schema, dl_start, dl_end, dataset, tmp_path
+                    )
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(tmp_path, dest)
+                except Exception:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
+
+                completed_ranges.append(DateRange(start=dl_start, end=dl_end))
+                self._save_incremental_meta(dataset, symbol, schema, completed_ranges)
+
+                if on_progress:
+                    on_progress(
+                        DownloadProgress(
+                            status=DownloadStatus.COMPLETED,
+                            partition=partition_info,
+                            current=current,
+                            total=total,
+                        )
+                    )
+
+                if cancelled and cancelled():
+                    raise DownloadCancelledError(current, total)
 
         files = self._get_cached_files(dataset, symbol, schema, start, end)
         return CachedData(files)
