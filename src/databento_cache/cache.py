@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import tempfile
+import warnings
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
@@ -42,6 +43,39 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_quality_warnings(
+    caught_warnings: list[warnings.WarningMessage],
+) -> list[DataQualityIssue]:
+    """Parse databento warnings into DataQualityIssue objects."""
+    issues: list[DataQualityIssue] = []
+    seen_dates: set[date] = set()
+
+    for w in caught_warnings:
+        msg = str(w.message)
+        if "reduced quality:" in msg:
+            parts = msg.split("reduced quality:")[1]
+            date_section = parts.split(".")[0].strip()
+            for entry in date_section.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                date_str = entry.split(" ")[0]
+                issue_type = "degraded"
+                if "(" in entry and ")" in entry:
+                    issue_type = entry.split("(")[1].split(")")[0]
+                try:
+                    d = date.fromisoformat(date_str)
+                    if d not in seen_dates:
+                        issues.append(
+                            DataQualityIssue(date=d, issue_type=issue_type, message=msg)
+                        )
+                        seen_dates.add(d)
+                except ValueError:
+                    pass
+
+    return sorted(issues, key=lambda i: i.date)
 
 
 class DataCache:
@@ -214,7 +248,9 @@ class DataCache:
                 path = get_partition_path(base_path, schema, year, month)
                 if not path.exists():
                     m_start, m_end = month_start_end(year, month)
-                    missing.append(DateRange(start=m_start, end=m_end))
+                    clamped_start = max(m_start, start)
+                    clamped_end = min(m_end, end)
+                    missing.append(DateRange(start=clamped_start, end=clamped_end))
 
         return self._merge_ranges(missing) if missing else []
 
@@ -431,7 +467,6 @@ class DataCache:
             cached_ranges = list(meta.ranges) if meta else []
             missing_from_meta = self._find_missing_ranges(start, end, cached_ranges)
 
-            # Also check for files that are missing on disk
             missing_files = self._get_missing_partitions(
                 dataset, symbol, schema, start, end
             )
@@ -452,48 +487,60 @@ class DataCache:
 
             completed_ranges: list[DateRange] = list(cached_ranges)
 
-            for current, (partition_info, dest, dl_start, dl_end) in enumerate(
-                partitions, start=1
-            ):
-                if on_progress:
-                    on_progress(
-                        DownloadProgress(
-                            status=DownloadStatus.DOWNLOADING,
-                            partition=partition_info,
-                            current=current,
-                            total=total,
-                        )
-                    )
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always")
+                warnings.filterwarnings("ignore", category=ResourceWarning)
 
-                with tempfile.NamedTemporaryFile(
-                    delete=False, suffix=".parquet"
-                ) as tmp:
-                    tmp_path = Path(tmp.name)
                 try:
-                    self._download_partition(
-                        symbol, schema, dl_start, dl_end, dataset, tmp_path
-                    )
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(tmp_path, dest)
-                except Exception:
-                    tmp_path.unlink(missing_ok=True)
-                    raise
+                    for current, (partition_info, dest, dl_start, dl_end) in enumerate(
+                        partitions, start=1
+                    ):
+                        if on_progress:
+                            on_progress(
+                                DownloadProgress(
+                                    status=DownloadStatus.DOWNLOADING,
+                                    partition=partition_info,
+                                    current=current,
+                                    total=total,
+                                )
+                            )
 
-                completed_ranges.append(DateRange(start=dl_start, end=dl_end))
-                self._save_incremental_meta(dataset, symbol, schema, completed_ranges)
+                        with tempfile.NamedTemporaryFile(
+                            delete=False, suffix=".parquet"
+                        ) as tmp:
+                            tmp_path = Path(tmp.name)
+                        try:
+                            self._download_partition(
+                                symbol, schema, dl_start, dl_end, dataset, tmp_path
+                            )
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.move(tmp_path, dest)
+                        except Exception:
+                            tmp_path.unlink(missing_ok=True)
+                            raise
 
-                if on_progress:
-                    on_progress(
-                        DownloadProgress(
-                            status=DownloadStatus.COMPLETED,
-                            partition=partition_info,
-                            current=current,
-                            total=total,
+                        completed_ranges.append(DateRange(start=dl_start, end=dl_end))
+                        self._save_incremental_meta(
+                            dataset, symbol, schema, completed_ranges
                         )
-                    )
 
-                if cancelled and cancelled():
-                    raise DownloadCancelledError(current, total)
+                        if on_progress:
+                            on_progress(
+                                DownloadProgress(
+                                    status=DownloadStatus.COMPLETED,
+                                    partition=partition_info,
+                                    current=current,
+                                    total=total,
+                                )
+                            )
+
+                        if cancelled and cancelled():
+                            raise DownloadCancelledError(current, total)
+
+                finally:
+                    issues = _parse_quality_warnings(list(caught_warnings))
+                    if issues:
+                        self.add_quality_issues(symbol, schema, issues, dataset)
 
         files = self._get_cached_files(dataset, symbol, schema, start, end)
 

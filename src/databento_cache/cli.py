@@ -1,6 +1,5 @@
 import signal
 import sys
-import warnings
 from datetime import date
 from types import FrameType
 
@@ -96,15 +95,10 @@ def _do_download(
     start: date,
     end: date,
     dataset: str,
-) -> list[DataQualityIssue]:
-    """Execute the download with progress bar.
-
-    Returns:
-        List of data quality issues encountered during download.
-    """
+) -> None:
+    """Execute the download with progress bar."""
     cancelled = False
     original_handler = signal.getsignal(signal.SIGINT)
-    captured_warnings: list[warnings.WarningMessage] = []
 
     def handle_sigint(signum: int, frame: FrameType | None) -> None:
         nonlocal cancelled
@@ -114,42 +108,25 @@ def _do_download(
     signal.signal(signal.SIGINT, handle_sigint)
 
     try:
-        bar_column = BarColumn(
-            bar_width=30,
-            complete_style="green",
-            finished_style="green",
-            pulse_style="blue",
-        )
         progress = Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
             MofNCompleteColumn(),
-            bar_column,
+            BarColumn(bar_width=30, complete_style="green", finished_style="green"),
             TaskProgressColumn(),
             RemainingTimeColumn(),
             console=console,
         )
-        has_warnings = False
 
-        with warnings.catch_warnings(record=True) as caught_warnings:
-            warnings.simplefilter("always")
-            # Suppress ResourceWarning from databento's internal async handling
-            warnings.filterwarnings("ignore", category=ResourceWarning)
-
+        try:
             with progress:
                 task_id = progress.add_task(f"Downloading {symbol}", total=None)
                 completed = 0
 
                 def on_progress(p: DownloadProgress) -> None:
-                    nonlocal completed, has_warnings
+                    nonlocal completed
                     if progress.tasks[task_id].total is None:
                         progress.update(task_id, total=p.total)
-
-                    # Check for new warnings and change bar color
-                    if caught_warnings and not has_warnings:
-                        has_warnings = True
-                        bar_column.complete_style = "yellow"
-                        bar_column.finished_style = "yellow"
 
                     if p.status == DownloadStatus.DOWNLOADING:
                         progress.update(
@@ -170,55 +147,18 @@ def _do_download(
                     cancelled=lambda: cancelled,
                 )
 
-            captured_warnings.extend(caught_warnings)
+            console.print(
+                f"[green]Successfully cached {len(result.paths)} file(s) "
+                f"for {symbol}[/green]"
+            )
 
-        console.print(
-            f"[green]Successfully cached {len(result.paths)} file(s) "
-            f"for {symbol}[/green]"
-        )
-
-        issues = _parse_quality_warnings(captured_warnings)
-        if issues:
-            _display_data_quality_issues(issues)
-
-        return issues
+        finally:
+            issues = cache.get_quality_issues(symbol, schema, dataset, start, end)
+            if issues:
+                _display_data_quality_issues(issues)
 
     finally:
         signal.signal(signal.SIGINT, original_handler)
-
-
-def _parse_quality_warnings(
-    captured_warnings: list[warnings.WarningMessage],
-) -> list[DataQualityIssue]:
-    """Parse warnings into DataQualityIssue objects."""
-    issues: list[DataQualityIssue] = []
-    seen_dates: set[date] = set()
-
-    for w in captured_warnings:
-        msg = str(w.message)
-        if "reduced quality:" in msg:
-            parts = msg.split("reduced quality:")[1]
-            date_section = parts.split(".")[0].strip()
-            for entry in date_section.split(","):
-                entry = entry.strip()
-                if not entry:
-                    continue
-                # Format: "2020-02-27 (degraded)" or just "2020-02-27"
-                date_str = entry.split(" ")[0]
-                issue_type = "degraded"
-                if "(" in entry and ")" in entry:
-                    issue_type = entry.split("(")[1].split(")")[0]
-                try:
-                    d = date.fromisoformat(date_str)
-                    if d not in seen_dates:
-                        issues.append(
-                            DataQualityIssue(date=d, issue_type=issue_type, message=msg)
-                        )
-                        seen_dates.add(d)
-                except ValueError:
-                    pass
-
-    return sorted(issues, key=lambda i: i.date)
 
 
 def _display_data_quality_issues(issues: list[DataQualityIssue]) -> None:
@@ -334,9 +274,7 @@ def download(
                     )
                     cache.clear_cache(symbol, schema, start, end, dataset)
 
-        issues = _do_download(cache, symbol, schema, start, end, dataset)
-        if issues:
-            cache.add_quality_issues(symbol, schema, issues, dataset)
+        _do_download(cache, symbol, schema, start, end, dataset)
 
     except DownloadCancelledError as e:
         console.print(
