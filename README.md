@@ -4,10 +4,20 @@ Download and cache historical market data from Databento.
 
 ## Installation
 
+### As a library
+
 ```bash
 uv add databento-cache
 # or
 pip install databento-cache
+```
+
+### CLI only (global install)
+
+```bash
+uv tool install databento-cache
+# or
+pipx install databento-cache
 ```
 
 ## Configuration
