@@ -1,0 +1,43 @@
+[project]
+name = "databento-cache"
+version = "0.1.0"
+description = "Download and cache historical market data from Databento"
+requires-python = ">=3.13"
+dependencies = [
+    "databento>=0.40",
+    "polars>=1.0",
+    "pandas>=2.0",
+    "pyarrow>=18.0",
+    "click>=8.0",
+    "pydantic>=2.0",
+    "filelock>=3.0",
+]
+
+[project.scripts]
+databento-cache = "databento_cache.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+    "pyright>=1.1",
+    "pandas-stubs>=2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "PTH"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
