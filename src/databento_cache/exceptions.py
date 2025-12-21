@@ -13,3 +13,15 @@ class DownloadCancelledError(Exception):
         self.completed = completed
         self.total = total
         super().__init__(f"Download cancelled after {completed}/{total} partitions")
+
+
+class EmptyDataError(Exception):
+    """Downloaded data is empty (symbol may not exist in dataset)."""
+
+    def __init__(self, symbol: str, dataset: str) -> None:
+        self.symbol = symbol
+        self.dataset = dataset
+        super().__init__(
+            f"No data returned for {symbol} in {dataset}. "
+            "Symbol may not exist in this dataset."
+        )

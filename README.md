@@ -26,25 +26,34 @@ export DATABENTO_CACHE_DIR=/path/to/cache
 
 ## CLI Usage
 
+The CLI is available as `dbn` (or `databento-cache`):
+
 ```bash
 # Show help
-databento-cache -h
-databento-cache download -h
+dbn -h
+dbn download -h
 
 # Download E-mini S&P 500 continuous futures (1-minute OHLCV)
-databento-cache download ES.c.0 --schema ohlcv-1m --start 2024-01-01 --end 2024-12-01
+dbn download ES.c.0 --schema ohlcv-1m --start 2024-01-01 --end 2024-12-01
 
 # Download specific contract
-databento-cache download ESZ24 --schema trades --start 2024-11-01 --end 2024-12-01
+dbn download ESZ24 --schema trades --start 2024-11-01 --end 2024-12-01
 
 # List cached data
-databento-cache list
+dbn list
 
 # Show info for specific symbol
-databento-cache info ES.c.0 --schema ohlcv-1m
+dbn info ES.c.0 --schema ohlcv-1m
+
+# Show data quality issues
+dbn quality ES.c.0 --schema ohlcv-1m
 
 # Estimate cost before downloading
-databento-cache cost ES.c.0 --schema trades --start 2024-01-01 --end 2024-12-01
+dbn cost ES.c.0 --schema trades --start 2024-01-01 --end 2024-12-01
+
+# Verify cache integrity (check for missing files)
+dbn verify
+dbn verify --fix  # Remove stale metadata for missing files
 ```
 
 ## Cancellation & Error Handling
@@ -80,6 +89,11 @@ try:
     data = cache.get("ES.c.0", "ohlcv-1m", date(2024, 1, 1), date(2024, 12, 1))
 except CacheMissError:
     print("Data not cached")
+
+# Get data quality issues
+issues = cache.get_quality_issues("ES.c.0", "ohlcv-1m")
+for issue in issues:
+    print(f"{issue.date}: {issue.issue_type}")
 
 # Custom cache location
 cache = DataCache(cache_dir=Path("/path/to/cache"))

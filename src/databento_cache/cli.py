@@ -1,5 +1,6 @@
 import signal
 import sys
+import warnings
 from datetime import date
 from types import FrameType
 
@@ -16,12 +17,19 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
+from rich.prompt import Prompt
 from rich.text import Text
 
 from .cache import DataCache
 from .client import DatabentoClient
-from .exceptions import DownloadCancelledError
-from .models import DownloadProgress, DownloadStatus
+from .exceptions import DownloadCancelledError, EmptyDataError
+from .models import (
+    CacheStatus,
+    DataQualityIssue,
+    DateRange,
+    DownloadProgress,
+    DownloadStatus,
+)
 
 console = Console()
 
@@ -53,12 +61,182 @@ def parse_date(value: str) -> date:
 
 
 @click.group(context_settings=CONTEXT_SETTINGS, invoke_without_command=True)
-@click.version_option(prog_name="databento-cache")
+@click.version_option(prog_name="dbn")
 @click.pass_context
 def main(ctx: click.Context) -> None:
     """Databento data cache utility."""
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
+
+
+def _format_ranges(ranges: list[DateRange]) -> str:
+    """Format date ranges for display."""
+    return ", ".join(f"{r.start} to {r.end}" for r in ranges)
+
+
+def _canonicalize_symbol(symbol: str) -> str:
+    """Canonicalize symbol for display.
+
+    - Continuous futures: es.c.0 → ES.c.0 (root uppercase, roll type lowercase)
+    - Explicit contracts: esu24 → ESU24 (all uppercase)
+    """
+    if "." in symbol:
+        # Continuous futures or parent: ES.c.0, ES.FUT
+        parts = symbol.split(".")
+        parts[0] = parts[0].upper()
+        return ".".join(parts)
+    # Explicit contract: ESU24
+    return symbol.upper()
+
+
+def _do_download(
+    cache: DataCache,
+    symbol: str,
+    schema: str,
+    start: date,
+    end: date,
+    dataset: str,
+) -> list[DataQualityIssue]:
+    """Execute the download with progress bar.
+
+    Returns:
+        List of data quality issues encountered during download.
+    """
+    cancelled = False
+    original_handler = signal.getsignal(signal.SIGINT)
+    captured_warnings: list[warnings.WarningMessage] = []
+
+    def handle_sigint(signum: int, frame: FrameType | None) -> None:
+        nonlocal cancelled
+        cancelled = True
+        console.print("\n[yellow]Cancelling...[/yellow]")
+
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    try:
+        bar_column = BarColumn(
+            bar_width=30,
+            complete_style="green",
+            finished_style="green",
+            pulse_style="blue",
+        )
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            MofNCompleteColumn(),
+            bar_column,
+            TaskProgressColumn(),
+            RemainingTimeColumn(),
+            console=console,
+        )
+        has_warnings = False
+
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always")
+            # Suppress ResourceWarning from databento's internal async handling
+            warnings.filterwarnings("ignore", category=ResourceWarning)
+
+            with progress:
+                task_id = progress.add_task(f"Downloading {symbol}", total=None)
+                completed = 0
+
+                def on_progress(p: DownloadProgress) -> None:
+                    nonlocal completed, has_warnings
+                    if progress.tasks[task_id].total is None:
+                        progress.update(task_id, total=p.total)
+
+                    # Check for new warnings and change bar color
+                    if caught_warnings and not has_warnings:
+                        has_warnings = True
+                        bar_column.complete_style = "yellow"
+                        bar_column.finished_style = "yellow"
+
+                    if p.status == DownloadStatus.DOWNLOADING:
+                        progress.update(
+                            task_id,
+                            description=f"Downloading {symbol} [{p.partition.label}]",
+                        )
+                    elif p.status == DownloadStatus.COMPLETED:
+                        completed = p.current
+                        progress.update(task_id, completed=completed)
+
+                result = cache.download(
+                    symbol,
+                    schema,
+                    start,
+                    end,
+                    dataset,
+                    on_progress=on_progress,
+                    cancelled=lambda: cancelled,
+                )
+
+            captured_warnings.extend(caught_warnings)
+
+        console.print(
+            f"[green]Successfully cached {len(result.paths)} file(s) "
+            f"for {symbol}[/green]"
+        )
+
+        issues = _parse_quality_warnings(captured_warnings)
+        if issues:
+            _display_data_quality_issues(issues)
+
+        return issues
+
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+
+
+def _parse_quality_warnings(
+    captured_warnings: list[warnings.WarningMessage],
+) -> list[DataQualityIssue]:
+    """Parse warnings into DataQualityIssue objects."""
+    issues: list[DataQualityIssue] = []
+    seen_dates: set[date] = set()
+
+    for w in captured_warnings:
+        msg = str(w.message)
+        if "reduced quality:" in msg:
+            parts = msg.split("reduced quality:")[1]
+            date_section = parts.split(".")[0].strip()
+            for entry in date_section.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                # Format: "2020-02-27 (degraded)" or just "2020-02-27"
+                date_str = entry.split(" ")[0]
+                issue_type = "degraded"
+                if "(" in entry and ")" in entry:
+                    issue_type = entry.split("(")[1].split(")")[0]
+                try:
+                    d = date.fromisoformat(date_str)
+                    if d not in seen_dates:
+                        issues.append(
+                            DataQualityIssue(date=d, issue_type=issue_type, message=msg)
+                        )
+                        seen_dates.add(d)
+                except ValueError:
+                    pass
+
+    return sorted(issues, key=lambda i: i.date)
+
+
+def _display_data_quality_issues(issues: list[DataQualityIssue]) -> None:
+    """Display data quality issues in a professional format."""
+    dates_str = ", ".join(str(i.date) for i in issues)
+    count = len(issues)
+
+    console.print(
+        Panel(
+            f"[yellow]{count} day(s) have reduced data quality:[/yellow]\n"
+            f"{dates_str}\n\n"
+            "[dim]See: https://databento.com/docs/api-reference-historical/"
+            "metadata/metadata-get-dataset-condition[/dim]",
+            title="Data Quality Notice",
+            border_style="yellow",
+            expand=False,
+        )
+    )
 
 
 @main.command()
@@ -67,16 +245,13 @@ def main(ctx: click.Context) -> None:
 @click.option("--start", required=True, type=parse_date, help="Start date (YYYY-MM-DD)")
 @click.option("--end", required=True, type=parse_date, help="End date (YYYY-MM-DD)")
 @click.option("--dataset", "-d", default="GLBX.MDP3", help="Databento dataset")
-def download(symbol: str, schema: str, start: date, end: date, dataset: str) -> None:
+@click.option("--force", "-f", is_flag=True, help="Force redownload without prompting")
+def download(
+    symbol: str, schema: str, start: date, end: date, dataset: str, force: bool
+) -> None:
     """Download and cache data for a symbol."""
+    symbol = _canonicalize_symbol(symbol)
     cache = DataCache()
-    cancelled = False
-    original_handler = signal.getsignal(signal.SIGINT)
-
-    def handle_sigint(signum: int, frame: FrameType | None) -> None:
-        nonlocal cancelled
-        cancelled = True
-        console.print("\n[yellow]Cancelling...[/yellow]")
 
     if ".v." in symbol or ".n." in symbol:
         console.print(
@@ -91,51 +266,77 @@ def download(symbol: str, schema: str, start: date, end: date, dataset: str) -> 
         )
         console.print()
 
-    signal.signal(signal.SIGINT, handle_sigint)
-
     try:
-        progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[bold blue]{task.description}"),
-            MofNCompleteColumn(),
-            BarColumn(bar_width=30, complete_style="green", finished_style="green"),
-            TaskProgressColumn(),
-            RemainingTimeColumn(),
-            console=console,
-        )
+        cache_status = cache.check_cache(symbol, schema, start, end, dataset)
 
-        with progress:
-            task_id = progress.add_task(f"Downloading {symbol}", total=None)
-            completed = 0
-
-            def on_progress(p: DownloadProgress) -> None:
-                nonlocal completed
-                if progress.tasks[task_id].total is None:
-                    progress.update(task_id, total=p.total)
-
-                if p.status == DownloadStatus.DOWNLOADING:
-                    progress.update(
-                        task_id,
-                        description=f"Downloading {symbol} [{p.partition.label}]",
+        if cache_status.status == CacheStatus.COMPLETE:
+            if force:
+                console.print(
+                    f"[yellow]Clearing cache and redownloading {symbol}...[/yellow]"
+                )
+                cache.clear_cache(symbol, schema, start, end, dataset)
+            else:
+                console.print(
+                    Panel(
+                        f"All data for [cyan]{symbol}[/cyan] from {start} to {end} "
+                        f"is already cached.\n"
+                        f"Cached: [green]{cache_status.cached_partitions}[/green] "
+                        f"partitions",
+                        title="Data Already Cached",
+                        border_style="green",
+                        expand=False,
                     )
-                elif p.status == DownloadStatus.COMPLETED:
-                    completed = p.current
-                    progress.update(task_id, completed=completed)
+                )
+                choice = Prompt.ask(
+                    r"\[r]edownload or \[c]ancel?",
+                    choices=["r", "c"],
+                    default="c",
+                )
+                if choice == "c":
+                    console.print("[dim]Cancelled.[/dim]")
+                    return
+                console.print("[yellow]Clearing cache and redownloading...[/yellow]")
+                cache.clear_cache(symbol, schema, start, end, dataset)
 
-            result = cache.download(
-                symbol,
-                schema,
-                start,
-                end,
-                dataset,
-                on_progress=on_progress,
-                cancelled=lambda: cancelled,
-            )
+        elif cache_status.status == CacheStatus.PARTIAL:
+            if force:
+                console.print(
+                    f"[yellow]Clearing cache and redownloading {symbol}...[/yellow]"
+                )
+                cache.clear_cache(symbol, schema, start, end, dataset)
+            else:
+                missing_str = _format_ranges(cache_status.missing_ranges)
+                cached_str = _format_ranges(cache_status.cached_ranges)
+                console.print(
+                    Panel(
+                        f"Partial data exists for [cyan]{symbol}[/cyan] "
+                        f"from {start} to {end}.\n\n"
+                        f"[green]Cached:[/green] {cached_str} "
+                        f"({cache_status.cached_partitions} partitions)\n"
+                        f"[yellow]Missing:[/yellow] {missing_str} "
+                        f"({cache_status.missing_partitions} partitions)",
+                        title="Partial Cache",
+                        border_style="yellow",
+                        expand=False,
+                    )
+                )
+                choice = Prompt.ask(
+                    r"\[f]ill gaps, \[r]edownload all, or \[c]ancel?",
+                    choices=["f", "r", "c"],
+                    default="f",
+                )
+                if choice == "c":
+                    console.print("[dim]Cancelled.[/dim]")
+                    return
+                if choice == "r":
+                    console.print(
+                        "[yellow]Clearing cache and redownloading...[/yellow]"
+                    )
+                    cache.clear_cache(symbol, schema, start, end, dataset)
 
-        console.print(
-            f"[green]Successfully cached {len(result.paths)} file(s) "
-            f"for {symbol}[/green]"
-        )
+        issues = _do_download(cache, symbol, schema, start, end, dataset)
+        if issues:
+            cache.add_quality_issues(symbol, schema, issues, dataset)
 
     except DownloadCancelledError as e:
         console.print(
@@ -149,6 +350,19 @@ def download(symbol: str, schema: str, start: date, end: date, dataset: str) -> 
             )
         )
         sys.exit(130)
+
+    except EmptyDataError as e:
+        console.print(
+            Panel(
+                f"No data returned for [cyan]{e.symbol}[/cyan].\n\n"
+                "This usually means the symbol doesn't exist in the dataset.\n"
+                f"[dim]Dataset: {e.dataset}[/dim]",
+                title="Empty Data",
+                border_style="yellow",
+                expand=False,
+            )
+        )
+        sys.exit(1)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
@@ -209,9 +423,6 @@ def download(symbol: str, schema: str, start: date, end: date, dataset: str) -> 
         )
         sys.exit(1)
 
-    finally:
-        signal.signal(signal.SIGINT, original_handler)
-
 
 @main.command("list")
 @click.option("--dataset", "-d", default=None, help="Filter by dataset")
@@ -233,23 +444,43 @@ def list_cached(dataset: str | None) -> None:
 
 @main.command()
 @click.argument("symbol")
-@click.option("--schema", "-s", required=True, help="Data schema")
-@click.option("--dataset", "-d", default="GLBX.MDP3", help="Databento dataset")
-def info(symbol: str, schema: str, dataset: str) -> None:
-    """Show cache info for a symbol."""
+@click.option("--schema", "-s", default=None, help="Data schema (optional)")
+@click.option("--dataset", "-d", default=None, help="Databento dataset (optional)")
+def info(symbol: str, schema: str | None, dataset: str | None) -> None:
+    """Show cache info for a symbol.
+
+    If no schema is specified, shows all cached schemas for the symbol.
+    Symbol matching is case-insensitive and supports prefix matching
+    (e.g., 'nq' matches 'NQ.c.0', 'NQU24', etc.).
+    """
+    display_symbol = _canonicalize_symbol(symbol)
     cache = DataCache()
-    result = cache.info(symbol, schema, dataset)
-    if result is None:
-        click.echo(f"No cached data for {symbol}/{schema}")
+    all_cached = cache.list_cached(dataset)
+
+    # Filter by symbol (case-insensitive prefix match)
+    symbol_lower = symbol.lower()
+    matches = [
+        item for item in all_cached if item.symbol.lower().startswith(symbol_lower)
+    ]
+
+    # Filter by schema if specified
+    if schema:
+        matches = [item for item in matches if item.schema_ == schema]
+
+    if not matches:
+        if schema:
+            console.print(f"No cached data for {display_symbol}/{schema}")
+        else:
+            console.print(f"No cached data for {display_symbol}")
         return
 
-    ranges_str = ", ".join(f"{r.start} to {r.end}" for r in result.ranges)
-    size_mb = result.size_bytes / (1024 * 1024)
-    click.echo(f"Symbol: {result.symbol}")
-    click.echo(f"Schema: {result.schema_}")
-    click.echo(f"Dataset: {result.dataset}")
-    click.echo(f"Ranges: {ranges_str}")
-    click.echo(f"Size: {size_mb:.2f} MB")
+    for item in matches:
+        ranges_str = ", ".join(f"{r.start} to {r.end}" for r in item.ranges)
+        size_mb = item.size_bytes / (1024 * 1024)
+        console.print(f"[cyan]{item.symbol}[/cyan] / [blue]{item.schema_}[/blue]")
+        console.print(f"  Dataset: {item.dataset}")
+        console.print(f"  Ranges:  {ranges_str}")
+        console.print(f"  Size:    {size_mb:.2f} MB")
 
 
 @main.command()
@@ -260,9 +491,150 @@ def info(symbol: str, schema: str, dataset: str) -> None:
 @click.option("--dataset", "-d", default="GLBX.MDP3", help="Databento dataset")
 def cost(symbol: str, schema: str, start: date, end: date, dataset: str) -> None:
     """Estimate download cost."""
-    client = DatabentoClient()
-    estimated = client.get_cost(symbol, schema, start, end, dataset)
-    click.echo(f"Estimated cost: ${estimated:.2f}")
+    symbol = _canonicalize_symbol(symbol)
+    try:
+        client = DatabentoClient()
+        estimated = client.get_cost(symbol, schema, start, end, dataset)
+        console.print(f"Estimated cost: [green]${estimated:.2f}[/green]")
+    except ValueError as e:
+        if "API key" in str(e):
+            console.print(
+                Panel(
+                    "Missing API key. Set the [cyan]DATABENTO_API_KEY[/cyan] "
+                    "environment variable.",
+                    title="Configuration Error",
+                    border_style="red",
+                    expand=False,
+                )
+            )
+        else:
+            console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+    except Exception as e:
+        err_str = str(e)
+        if "symbology" in err_str or "symbols could not be resolved" in err_str:
+            console.print(
+                Panel(
+                    f"Symbol [cyan]{symbol}[/cyan] not found in dataset "
+                    f"[cyan]{dataset}[/cyan].\n\n"
+                    "[dim]Note: GLBX.MDP3 is for CME futures only. "
+                    "For stocks, use the appropriate exchange dataset.[/dim]",
+                    title="Symbol Not Found",
+                    border_style="red",
+                    expand=False,
+                )
+            )
+        else:
+            console.print(f"[red]{type(e).__name__}:[/red] {e}")
+        sys.exit(1)
+
+
+@main.command()
+@click.option("--symbol", "-y", default=None, help="Filter by symbol (prefix match)")
+@click.option("--schema", "-s", default=None, help="Filter by schema")
+@click.option("--dataset", "-d", default=None, help="Filter by dataset")
+@click.option("--fix", is_flag=True, help="Remove stale metadata for missing files")
+def verify(
+    symbol: str | None, schema: str | None, dataset: str | None, fix: bool
+) -> None:
+    """Verify cache integrity (check for missing files)."""
+    cache = DataCache()
+    all_cached = cache.list_cached(dataset)
+
+    if symbol:
+        symbol_lower = symbol.lower()
+        all_cached = [
+            item for item in all_cached if item.symbol.lower().startswith(symbol_lower)
+        ]
+
+    if schema:
+        all_cached = [item for item in all_cached if item.schema_ == schema]
+
+    if not all_cached:
+        console.print("No cached data to verify.")
+        return
+
+    issues_found = 0
+    for item in all_cached:
+        for r in item.ranges:
+            check = cache.check_cache(
+                item.symbol, item.schema_, r.start, r.end, item.dataset
+            )
+            if check.status != CacheStatus.COMPLETE:
+                issues_found += 1
+                missing_str = _format_ranges(check.missing_ranges)
+                console.print(
+                    f"[red]✗[/red] {item.symbol}/{item.schema_}: "
+                    f"missing files for {missing_str}"
+                )
+                if fix:
+                    cache.clear_cache(
+                        item.symbol, item.schema_, r.start, r.end, item.dataset
+                    )
+                    console.print("  [yellow]→ Cleared stale metadata[/yellow]")
+
+    if issues_found == 0:
+        console.print(f"[green]✓[/green] All {len(all_cached)} cached items verified")
+    elif not fix:
+        console.print("\n[dim]Run with --fix to remove stale metadata[/dim]")
+
+
+@main.command()
+@click.argument("symbol")
+@click.option("--schema", "-s", default=None, help="Data schema (optional)")
+@click.option("--dataset", "-d", default=None, help="Databento dataset (optional)")
+@click.option("--start", type=parse_date, help="Filter by start date")
+@click.option("--end", type=parse_date, help="Filter by end date")
+def quality(
+    symbol: str,
+    schema: str | None,
+    dataset: str | None,
+    start: date | None,
+    end: date | None,
+) -> None:
+    """Show data quality issues for a symbol.
+
+    If no schema is specified, shows issues for all cached schemas.
+    Symbol matching is case-insensitive and supports prefix matching
+    (e.g., 'nq' matches 'NQ.c.0', 'NQU24', etc.).
+    """
+    display_symbol = _canonicalize_symbol(symbol)
+    cache = DataCache()
+    all_cached = cache.list_cached(dataset)
+
+    # Filter by symbol (case-insensitive prefix match)
+    symbol_lower = symbol.lower()
+    matches = [
+        item for item in all_cached if item.symbol.lower().startswith(symbol_lower)
+    ]
+
+    # Filter by schema if specified
+    if schema:
+        matches = [item for item in matches if item.schema_ == schema]
+
+    if not matches:
+        if schema:
+            console.print(f"No cached data for {display_symbol}/{schema}")
+        else:
+            console.print(f"No cached data for {display_symbol}")
+        return
+
+    found_any = False
+    for item in matches:
+        issues = cache.get_quality_issues(
+            item.symbol, item.schema_, item.dataset, start, end
+        )
+        if issues:
+            found_any = True
+            console.print(
+                f"[cyan]{item.symbol}[/cyan] / [blue]{item.schema_}[/blue]: "
+                f"[yellow]{len(issues)} issue(s)[/yellow]"
+            )
+            for issue in issues:
+                console.print(f"  {issue.date}: {issue.issue_type}")
+
+    if not found_any:
+        console.print(f"No data quality issues recorded for {display_symbol}")
 
 
 if __name__ == "__main__":

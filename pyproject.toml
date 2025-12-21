@@ -15,6 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
+dbn = "databento_cache.cli:main"
 databento-cache = "databento_cache.cli:main"
 
 [dependency-groups]

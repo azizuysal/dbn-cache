@@ -15,6 +15,30 @@ class DownloadStatus(Enum):
     COMPLETED = auto()
 
 
+class CacheStatus(Enum):
+    """Status of cache for a requested date range."""
+
+    EMPTY = auto()
+    PARTIAL = auto()
+    COMPLETE = auto()
+
+
+@dataclass
+class CacheCheckResult:
+    """Result of checking cache status for a date range."""
+
+    status: CacheStatus
+    cached_ranges: list["DateRange"]
+    missing_ranges: list["DateRange"]
+    cached_partitions: int
+    missing_partitions: int
+
+    @property
+    def total_partitions(self) -> int:
+        """Total partitions in the requested range."""
+        return self.cached_partitions + self.missing_partitions
+
+
 @dataclass
 class PartitionInfo:
     """Information about a single partition."""
@@ -56,6 +80,14 @@ class ContractSpecs(BaseModel):
     currency: str | None = None
 
 
+class DataQualityIssue(BaseModel):
+    """A data quality issue for a specific date."""
+
+    date: date
+    issue_type: str
+    message: str | None = None
+
+
 class SymbolMeta(BaseModel):
     """Metadata for a cached symbol/schema combination."""
 
@@ -67,6 +99,7 @@ class SymbolMeta(BaseModel):
     updated_at: datetime
     cache_version: int = 1
     contract_specs: ContractSpecs | None = None
+    quality_issues: list[DataQualityIssue] = []
 
     model_config = {"populate_by_name": True}
 

@@ -8,13 +8,17 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import polars as pl
 from filelock import FileLock
 
 from .client import DatabentoClient
-from .exceptions import CacheMissError, DownloadCancelledError
+from .exceptions import CacheMissError, DownloadCancelledError, EmptyDataError
 from .models import (
+    CacheCheckResult,
     CachedData,
     CachedDataInfo,
+    CacheStatus,
+    DataQualityIssue,
     DateRange,
     DownloadProgress,
     DownloadStatus,
@@ -168,6 +172,174 @@ class DataCache:
 
         return files
 
+    def _count_partitions_in_range(
+        self,
+        schema: str,
+        start: date,
+        end: date,
+    ) -> int:
+        """Count total partitions in a date range."""
+        count = 0
+        if is_tick_schema(schema):
+            for _ in iter_days(start, end):
+                count += 1
+        else:
+            for _ in iter_months(start, end):
+                count += 1
+        return count
+
+    def _get_missing_partitions(
+        self,
+        dataset: str,
+        symbol: str,
+        schema: str,
+        start: date,
+        end: date,
+    ) -> list[DateRange]:
+        """Find partitions that are missing actual files on disk.
+
+        Returns date ranges for partitions where files don't exist,
+        regardless of what metadata says.
+        """
+        base_path = self._get_symbol_path(dataset, symbol, schema)
+        missing: list[DateRange] = []
+
+        if is_tick_schema(schema):
+            for d in iter_days(start, end):
+                path = get_partition_path(base_path, schema, d.year, d.month, d.day)
+                if not path.exists():
+                    missing.append(DateRange(start=d, end=d))
+        else:
+            for year, month in iter_months(start, end):
+                path = get_partition_path(base_path, schema, year, month)
+                if not path.exists():
+                    m_start, m_end = month_start_end(year, month)
+                    missing.append(DateRange(start=m_start, end=m_end))
+
+        return self._merge_ranges(missing) if missing else []
+
+    def check_cache(
+        self,
+        symbol: str,
+        schema: str,
+        start: date,
+        end: date,
+        dataset: str = "GLBX.MDP3",
+        verify_files: bool = True,
+    ) -> CacheCheckResult:
+        """Check cache status for a date range.
+
+        Args:
+            symbol: Symbol to check
+            schema: Data schema
+            start: Start date (inclusive)
+            end: End date (inclusive)
+            dataset: Databento dataset
+            verify_files: If True, verify actual files exist (not just metadata)
+
+        Returns:
+            CacheCheckResult with status and details about cached/missing data.
+        """
+        meta = self._load_meta(dataset, symbol, schema)
+        cached_ranges = list(meta.ranges) if meta else []
+        missing_from_meta = self._find_missing_ranges(start, end, cached_ranges)
+
+        if verify_files:
+            missing_files = self._get_missing_partitions(
+                dataset, symbol, schema, start, end
+            )
+            all_missing = missing_from_meta + missing_files
+            missing_ranges = self._merge_ranges(all_missing) if all_missing else []
+        else:
+            missing_ranges = missing_from_meta
+
+        total_partitions = self._count_partitions_in_range(schema, start, end)
+
+        if not missing_ranges:
+            return CacheCheckResult(
+                status=CacheStatus.COMPLETE,
+                cached_ranges=cached_ranges,
+                missing_ranges=[],
+                cached_partitions=total_partitions,
+                missing_partitions=0,
+            )
+
+        missing_partitions = sum(
+            self._count_partitions_in_range(schema, r.start, r.end)
+            for r in missing_ranges
+        )
+        cached_partitions = total_partitions - missing_partitions
+        status = CacheStatus.EMPTY if cached_partitions == 0 else CacheStatus.PARTIAL
+
+        return CacheCheckResult(
+            status=status,
+            cached_ranges=cached_ranges,
+            missing_ranges=missing_ranges,
+            cached_partitions=cached_partitions,
+            missing_partitions=missing_partitions,
+        )
+
+    def clear_cache(
+        self,
+        symbol: str,
+        schema: str,
+        start: date,
+        end: date,
+        dataset: str = "GLBX.MDP3",
+    ) -> int:
+        """Clear cached data for a date range.
+
+        Args:
+            symbol: Symbol to clear
+            schema: Data schema
+            start: Start date (inclusive)
+            end: End date (inclusive)
+            dataset: Databento dataset
+
+        Returns:
+            Number of partition files deleted.
+        """
+        base_path = self._get_symbol_path(dataset, symbol, schema)
+        deleted = 0
+
+        with self._lock(dataset, symbol, schema):
+            if is_tick_schema(schema):
+                for d in iter_days(start, end):
+                    path = get_partition_path(base_path, schema, d.year, d.month, d.day)
+                    if path.exists():
+                        path.unlink()
+                        deleted += 1
+            else:
+                for year, month in iter_months(start, end):
+                    path = get_partition_path(base_path, schema, year, month)
+                    if path.exists():
+                        path.unlink()
+                        deleted += 1
+
+            meta = self._load_meta(dataset, symbol, schema)
+            if meta:
+                remaining_ranges: list[DateRange] = []
+                for r in meta.ranges:
+                    if r.end < start or r.start > end:
+                        remaining_ranges.append(r)
+                    elif r.start < start and r.end > end:
+                        remaining_ranges.append(DateRange(start=r.start, end=start))
+                        remaining_ranges.append(DateRange(start=end, end=r.end))
+                    elif r.start < start:
+                        remaining_ranges.append(DateRange(start=r.start, end=start))
+                    elif r.end > end:
+                        remaining_ranges.append(DateRange(start=end, end=r.end))
+
+                if remaining_ranges:
+                    meta.ranges = self._merge_ranges(remaining_ranges)
+                    self._save_meta(meta)
+                else:
+                    meta_path = self._get_meta_path(dataset, symbol, schema)
+                    if meta_path.exists():
+                        meta_path.unlink()
+
+        return deleted
+
     def _count_partitions_to_download(
         self,
         schema: str,
@@ -257,7 +429,14 @@ class DataCache:
         with self._lock(dataset, symbol, schema):
             meta = self._load_meta(dataset, symbol, schema)
             cached_ranges = list(meta.ranges) if meta else []
-            missing = self._find_missing_ranges(start, end, cached_ranges)
+            missing_from_meta = self._find_missing_ranges(start, end, cached_ranges)
+
+            # Also check for files that are missing on disk
+            missing_files = self._get_missing_partitions(
+                dataset, symbol, schema, start, end
+            )
+            all_missing = missing_from_meta + missing_files
+            missing = self._merge_ranges(all_missing) if all_missing else []
 
             if not missing:
                 files = self._get_cached_files(dataset, symbol, schema, start, end)
@@ -317,6 +496,19 @@ class DataCache:
                     raise DownloadCancelledError(current, total)
 
         files = self._get_cached_files(dataset, symbol, schema, start, end)
+
+        # Check if downloaded files have actual data (not just empty parquet schema)
+        total_rows = sum(
+            pl.scan_parquet(f).select(pl.len()).collect().item() for f in files
+        )
+        if total_rows == 0:
+            # Clean up empty files and metadata
+            for f in files:
+                f.unlink(missing_ok=True)
+            meta_path = self._get_meta_path(dataset, symbol, schema)
+            meta_path.unlink(missing_ok=True)
+            raise EmptyDataError(symbol, dataset)
+
         return CachedData(files)
 
     def get(
@@ -340,16 +532,14 @@ class DataCache:
             CachedData wrapper.
 
         Raises:
-            CacheMissError: If data is not fully cached.
+            CacheMissError: If data is not fully cached or files are missing.
         """
-        meta = self._load_meta(dataset, symbol, schema)
-        if meta is None:
-            msg = f"No cached data for {symbol}/{schema}"
-            raise CacheMissError(msg)
-
-        missing = self._find_missing_ranges(start, end, meta.ranges)
-        if missing:
-            msg = f"Missing data for {symbol}/{schema}: {missing}"
+        check = self.check_cache(symbol, schema, start, end, dataset, verify_files=True)
+        if check.status != CacheStatus.COMPLETE:
+            if check.status == CacheStatus.EMPTY:
+                msg = f"No cached data for {symbol}/{schema}"
+            else:
+                msg = f"Missing data for {symbol}/{schema}: {check.missing_ranges}"
             raise CacheMissError(msg)
 
         files = self._get_cached_files(dataset, symbol, schema, start, end)
@@ -451,3 +641,67 @@ class DataCache:
             ranges=meta.ranges,
             size_bytes=size,
         )
+
+    def add_quality_issues(
+        self,
+        symbol: str,
+        schema: str,
+        issues: list[DataQualityIssue],
+        dataset: str = "GLBX.MDP3",
+    ) -> None:
+        """Add data quality issues to metadata.
+
+        Args:
+            symbol: Symbol
+            schema: Data schema
+            issues: List of quality issues to add
+            dataset: Databento dataset
+        """
+        if not issues:
+            return
+
+        with self._lock(dataset, symbol, schema):
+            meta = self._load_meta(dataset, symbol, schema)
+            if meta is None:
+                return
+
+            existing_dates = {i.date for i in meta.quality_issues}
+            for issue in issues:
+                if issue.date not in existing_dates:
+                    meta.quality_issues.append(issue)
+                    existing_dates.add(issue.date)
+
+            meta.quality_issues.sort(key=lambda i: i.date)
+            self._save_meta(meta)
+
+    def get_quality_issues(
+        self,
+        symbol: str,
+        schema: str,
+        dataset: str = "GLBX.MDP3",
+        start: date | None = None,
+        end: date | None = None,
+    ) -> list[DataQualityIssue]:
+        """Get data quality issues for a symbol.
+
+        Args:
+            symbol: Symbol
+            schema: Data schema
+            dataset: Databento dataset
+            start: Optional start date filter
+            end: Optional end date filter
+
+        Returns:
+            List of quality issues, optionally filtered by date range.
+        """
+        meta = self._load_meta(dataset, symbol, schema)
+        if meta is None:
+            return []
+
+        issues = meta.quality_issues
+        if start is not None:
+            issues = [i for i in issues if i.date >= start]
+        if end is not None:
+            issues = [i for i in issues if i.date <= end]
+
+        return issues
