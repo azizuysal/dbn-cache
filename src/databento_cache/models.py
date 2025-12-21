@@ -63,6 +63,7 @@ class DownloadProgress:
     partition: PartitionInfo
     current: int
     total: int
+    quality_warnings: int = 0
 
 
 class DateRange(BaseModel):

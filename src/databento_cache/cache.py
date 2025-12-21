@@ -492,6 +492,13 @@ class DataCache:
                 warnings.simplefilter("always")
                 warnings.filterwarnings("ignore", category=ResourceWarning)
 
+                def count_quality_warnings() -> int:
+                    return sum(
+                        1
+                        for w in caught_warnings
+                        if "reduced quality:" in str(w.message)
+                    )
+
                 try:
                     for current, (partition_info, dest, dl_start, dl_end) in enumerate(
                         partitions, start=1
@@ -503,6 +510,7 @@ class DataCache:
                                     partition=partition_info,
                                     current=current,
                                     total=total,
+                                    quality_warnings=count_quality_warnings(),
                                 )
                             )
 
@@ -532,6 +540,7 @@ class DataCache:
                                     partition=partition_info,
                                     current=current,
                                     total=total,
+                                    quality_warnings=count_quality_warnings(),
                                 )
                             )
 
@@ -541,7 +550,9 @@ class DataCache:
                 finally:
                     issues = _parse_quality_warnings(list(caught_warnings))
                     if issues:
-                        self.add_quality_issues(symbol, schema, issues, dataset)
+                        self._add_quality_issues_unlocked(
+                            symbol, schema, issues, dataset
+                        )
 
         files = self._get_cached_files(dataset, symbol, schema, start, end)
 
@@ -690,6 +701,30 @@ class DataCache:
             size_bytes=size,
         )
 
+    def _add_quality_issues_unlocked(
+        self,
+        symbol: str,
+        schema: str,
+        issues: list[DataQualityIssue],
+        dataset: str,
+    ) -> None:
+        """Add quality issues without acquiring lock (caller must hold lock)."""
+        if not issues:
+            return
+
+        meta = self._load_meta(dataset, symbol, schema)
+        if meta is None:
+            return
+
+        existing_dates = {i.date for i in meta.quality_issues}
+        for issue in issues:
+            if issue.date not in existing_dates:
+                meta.quality_issues.append(issue)
+                existing_dates.add(issue.date)
+
+        meta.quality_issues.sort(key=lambda i: i.date)
+        self._save_meta(meta)
+
     def add_quality_issues(
         self,
         symbol: str,
@@ -709,18 +744,7 @@ class DataCache:
             return
 
         with self._lock(dataset, symbol, schema):
-            meta = self._load_meta(dataset, symbol, schema)
-            if meta is None:
-                return
-
-            existing_dates = {i.date for i in meta.quality_issues}
-            for issue in issues:
-                if issue.date not in existing_dates:
-                    meta.quality_issues.append(issue)
-                    existing_dates.add(issue.date)
-
-            meta.quality_issues.sort(key=lambda i: i.date)
-            self._save_meta(meta)
+            self._add_quality_issues_unlocked(symbol, schema, issues, dataset)
 
     def get_quality_issues(
         self,

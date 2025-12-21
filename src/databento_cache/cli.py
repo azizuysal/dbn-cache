@@ -95,33 +95,45 @@ def _do_download(
     cancelled = False
     original_handler = signal.getsignal(signal.SIGINT)
 
+    bar_column = BarColumn(
+        bar_width=30,
+        complete_style="green",
+        finished_style="green",
+        pulse_style="green",
+    )
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        MofNCompleteColumn(),
+        bar_column,
+        TaskProgressColumn(),
+        RemainingTimeColumn(),
+        console=console,
+    )
+
     def handle_sigint(signum: int, frame: FrameType | None) -> None:
         nonlocal cancelled
         cancelled = True
-        console.print("\n[yellow]Cancelling...[/yellow]")
+        progress.console.print("[yellow]Cancelling...[/yellow]")
 
     signal.signal(signal.SIGINT, handle_sigint)
 
     try:
-        progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[bold blue]{task.description}"),
-            MofNCompleteColumn(),
-            BarColumn(bar_width=30, complete_style="green", finished_style="green"),
-            TaskProgressColumn(),
-            RemainingTimeColumn(),
-            console=console,
-        )
-
         try:
             with progress:
                 task_id = progress.add_task(f"Downloading {symbol}", total=None)
                 completed = 0
+                warned = False
 
                 def on_progress(p: DownloadProgress) -> None:
-                    nonlocal completed
+                    nonlocal completed, warned
                     if progress.tasks[task_id].total is None:
                         progress.update(task_id, total=p.total)
+
+                    if p.quality_warnings > 0 and not warned:
+                        warned = True
+                        bar_column.complete_style = "yellow"
+                        bar_column.finished_style = "yellow"
 
                     if p.status == DownloadStatus.DOWNLOADING:
                         progress.update(
