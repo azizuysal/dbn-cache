@@ -725,27 +725,6 @@ class DataCache:
         meta.quality_issues.sort(key=lambda i: i.date)
         self._save_meta(meta)
 
-    def add_quality_issues(
-        self,
-        symbol: str,
-        schema: str,
-        issues: list[DataQualityIssue],
-        dataset: str = "GLBX.MDP3",
-    ) -> None:
-        """Add data quality issues to metadata.
-
-        Args:
-            symbol: Symbol
-            schema: Data schema
-            issues: List of quality issues to add
-            dataset: Databento dataset
-        """
-        if not issues:
-            return
-
-        with self._lock(dataset, symbol, schema):
-            self._add_quality_issues_unlocked(symbol, schema, issues, dataset)
-
     def get_quality_issues(
         self,
         symbol: str,
