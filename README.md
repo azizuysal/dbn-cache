@@ -64,6 +64,24 @@ dbn cost ES.c.0 --schema trades --start 2024-01-01 --end 2024-12-01
 # Verify cache integrity (check for missing files)
 dbn verify
 dbn verify --fix  # Remove stale metadata for missing files
+
+# Reference commands
+dbn datasets  # List available datasets
+dbn schemas   # List available schemas
+dbn symbols   # Show symbol format examples
+```
+
+### Shell Completions
+
+```bash
+# Zsh (add to .zshrc)
+eval "$(dbn completions zsh)"
+
+# Bash (add to .bashrc)
+eval "$(dbn completions bash)"
+
+# Fish
+dbn completions fish > ~/.config/fish/completions/dbn.fish
 ```
 
 ## Cancellation & Error Handling

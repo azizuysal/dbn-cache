@@ -592,6 +592,26 @@ def symbols() -> None:
 
 
 @main.command()
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
+def completions(shell: str) -> None:
+    """Generate shell completion script.
+
+    \b
+    Usage:
+      eval "$(dbn completions zsh)"   # Add to .zshrc/.bashrc
+      eval "$(dbn completions bash)"
+      dbn completions fish > ~/.config/fish/completions/dbn.fish
+    """
+    import os
+    import subprocess
+
+    env = os.environ.copy()
+    env["_DBN_COMPLETE"] = f"{shell}_source"
+    result = subprocess.run(["dbn"], env=env, capture_output=True, text=True)
+    click.echo(result.stdout, nl=False)
+
+
+@main.command()
 @click.argument("symbol")
 @click.option("--schema", "-s", default=None, help="Data schema (optional)")
 @click.option("--dataset", "-d", default=None, help="Databento dataset (optional)")
