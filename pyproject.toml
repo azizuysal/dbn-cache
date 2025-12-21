@@ -19,7 +19,7 @@ dbn = "databento_cache.cli:main"
 databento-cache = "databento_cache.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.8", "pyright>=1.1", "pandas-stubs>=2.0"]
+dev = ["pytest>=8.0", "pytest-cov>=6.0", "ruff>=0.8", "pyright>=1.1", "pandas-stubs>=2.0"]
 
 [build-system]
 requires = ["hatchling"]
