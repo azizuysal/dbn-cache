@@ -21,13 +21,18 @@ from rich.text import Text
 
 from .cache import DataCache
 from .client import DatabentoClient
-from .exceptions import DownloadCancelledError, EmptyDataError
+from .exceptions import DownloadCancelledError, EmptyDataError, MissingAPIKeyError
 from .models import (
     CacheStatus,
     DataQualityIssue,
-    DateRange,
     DownloadProgress,
     DownloadStatus,
+)
+from .utils import (
+    filter_by_symbol_prefix,
+    format_date_ranges,
+    has_lookahead_bias,
+    parse_date,
 )
 
 console = Console()
@@ -54,11 +59,6 @@ class RemainingTimeColumn(TimeRemainingColumn):
         return Text(f"remaining {minutes}:{seconds:02d}", style="progress.remaining")
 
 
-def parse_date(value: str) -> date:
-    """Parse date string (YYYY-MM-DD)."""
-    return date.fromisoformat(value)
-
-
 @click.group(context_settings=CONTEXT_SETTINGS, invoke_without_command=True)
 @click.version_option(prog_name="dbn")
 @click.pass_context
@@ -66,11 +66,6 @@ def main(ctx: click.Context) -> None:
     """Databento data cache utility."""
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
-
-
-def _format_ranges(ranges: list[DateRange]) -> str:
-    """Format date ranges for display."""
-    return ", ".join(f"{r.start} to {r.end}" for r in ranges)
 
 
 def _canonicalize_symbol(symbol: str) -> str:
@@ -193,7 +188,7 @@ def download(
     symbol = _canonicalize_symbol(symbol)
     cache = DataCache()
 
-    if ".v." in symbol or ".n." in symbol:
+    if has_lookahead_bias(symbol):
         console.print(
             Panel(
                 f"[bold yellow]Warning:[/bold yellow] Symbol [cyan]{symbol}[/cyan] "
@@ -245,8 +240,8 @@ def download(
                 )
                 cache.clear_cache(symbol, schema, start, end, dataset)
             else:
-                missing_str = _format_ranges(cache_status.missing_ranges)
-                cached_str = _format_ranges(cache_status.cached_ranges)
+                missing_str = format_date_ranges(cache_status.missing_ranges)
+                cached_str = format_date_ranges(cache_status.cached_ranges)
                 console.print(
                     Panel(
                         f"Partial data exists for [cyan]{symbol}[/cyan] "
@@ -328,26 +323,16 @@ def download(
         )
         sys.exit(1)
 
-    except ValueError as e:
-        if "API key" in str(e):
-            console.print(
-                Panel(
-                    "Missing API key. Set the [cyan]DATABENTO_API_KEY[/cyan] "
-                    "environment variable.",
-                    title="Configuration Error",
-                    border_style="red",
-                    expand=False,
-                )
+    except MissingAPIKeyError:
+        console.print(
+            Panel(
+                "Missing API key. Set the [cyan]DATABENTO_API_KEY[/cyan] "
+                "environment variable.",
+                title="Configuration Error",
+                border_style="red",
+                expand=False,
             )
-        else:
-            console.print(
-                Panel(
-                    f"[red]ValueError:[/red] {e}",
-                    title="Error",
-                    border_style="red",
-                    expand=False,
-                )
-            )
+        )
         sys.exit(1)
 
     except Exception as e:
@@ -373,7 +358,7 @@ def list_cached(dataset: str | None) -> None:
         return
 
     for item in items:
-        ranges_str = ", ".join(f"{r.start} to {r.end}" for r in item.ranges)
+        ranges_str = format_date_ranges(item.ranges)
         size_mb = item.size_bytes / (1024 * 1024)
         click.echo(f"{item.dataset}/{item.symbol}/{item.schema_}")
         click.echo(f"  Ranges: {ranges_str}")
@@ -395,13 +380,8 @@ def info(symbol: str, schema: str | None, dataset: str | None) -> None:
     cache = DataCache()
     all_cached = cache.list_cached(dataset)
 
-    # Filter by symbol (case-insensitive prefix match)
-    symbol_lower = symbol.lower()
-    matches = [
-        item for item in all_cached if item.symbol.lower().startswith(symbol_lower)
-    ]
+    matches = filter_by_symbol_prefix(all_cached, symbol)
 
-    # Filter by schema if specified
     if schema:
         matches = [item for item in matches if item.schema_ == schema]
 
@@ -413,7 +393,7 @@ def info(symbol: str, schema: str | None, dataset: str | None) -> None:
         return
 
     for item in matches:
-        ranges_str = ", ".join(f"{r.start} to {r.end}" for r in item.ranges)
+        ranges_str = format_date_ranges(item.ranges)
         size_mb = item.size_bytes / (1024 * 1024)
         console.print(f"[cyan]{item.symbol}[/cyan] / [blue]{item.schema_}[/blue]")
         console.print(f"  Dataset: {item.dataset}")
@@ -434,19 +414,16 @@ def cost(symbol: str, schema: str, start: date, end: date, dataset: str) -> None
         client = DatabentoClient()
         estimated = client.get_cost(symbol, schema, start, end, dataset)
         console.print(f"Estimated cost: [green]${estimated:.2f}[/green]")
-    except ValueError as e:
-        if "API key" in str(e):
-            console.print(
-                Panel(
-                    "Missing API key. Set the [cyan]DATABENTO_API_KEY[/cyan] "
-                    "environment variable.",
-                    title="Configuration Error",
-                    border_style="red",
-                    expand=False,
-                )
+    except MissingAPIKeyError:
+        console.print(
+            Panel(
+                "Missing API key. Set the [cyan]DATABENTO_API_KEY[/cyan] "
+                "environment variable.",
+                title="Configuration Error",
+                border_style="red",
+                expand=False,
             )
-        else:
-            console.print(f"[red]Error:[/red] {e}")
+        )
         sys.exit(1)
     except Exception as e:
         err_str = str(e)
@@ -480,10 +457,7 @@ def verify(
     all_cached = cache.list_cached(dataset)
 
     if symbol:
-        symbol_lower = symbol.lower()
-        all_cached = [
-            item for item in all_cached if item.symbol.lower().startswith(symbol_lower)
-        ]
+        all_cached = filter_by_symbol_prefix(all_cached, symbol)
 
     if schema:
         all_cached = [item for item in all_cached if item.schema_ == schema]
@@ -500,7 +474,7 @@ def verify(
             )
             if check.status != CacheStatus.COMPLETE:
                 issues_found += 1
-                missing_str = _format_ranges(check.missing_ranges)
+                missing_str = format_date_ranges(check.missing_ranges)
                 console.print(
                     f"[red]✗[/red] {item.symbol}/{item.schema_}: "
                     f"missing files for {missing_str}"
@@ -540,13 +514,8 @@ def quality(
     cache = DataCache()
     all_cached = cache.list_cached(dataset)
 
-    # Filter by symbol (case-insensitive prefix match)
-    symbol_lower = symbol.lower()
-    matches = [
-        item for item in all_cached if item.symbol.lower().startswith(symbol_lower)
-    ]
+    matches = filter_by_symbol_prefix(all_cached, symbol)
 
-    # Filter by schema if specified
     if schema:
         matches = [item for item in matches if item.schema_ == schema]
 

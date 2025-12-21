@@ -31,6 +31,7 @@ from .utils import (
     find_missing_date_ranges,
     get_default_cache_dir,
     get_partition_path,
+    has_lookahead_bias,
     is_tick_schema,
     iter_days,
     iter_months,
@@ -453,7 +454,7 @@ class DataCache:
         Raises:
             DownloadCancelledError: If download was cancelled via the cancelled callback
         """
-        if ".v." in symbol or ".n." in symbol:
+        if has_lookahead_bias(symbol):
             logger.warning(
                 "Symbol %s uses volume/OI-based rolls which have look-ahead bias. "
                 "Use calendar rolls (.c.) for backtesting.",

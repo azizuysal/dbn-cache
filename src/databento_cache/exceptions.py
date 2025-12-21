@@ -6,6 +6,15 @@ class PartialCacheError(Exception):
     """Only part of the requested date range is cached."""
 
 
+class MissingAPIKeyError(Exception):
+    """API key is missing."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "API key required. Set DATABENTO_API_KEY environment variable."
+        )
+
+
 class DownloadCancelledError(Exception):
     """Download was cancelled by user."""
 

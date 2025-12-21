@@ -3,6 +3,7 @@ from datetime import date
 
 import databento as db
 
+from .exceptions import MissingAPIKeyError
 from .utils import detect_stype
 
 
@@ -17,8 +18,7 @@ class DatabentoClient:
         """
         key = api_key or os.environ.get("DATABENTO_API_KEY")
         if not key:
-            msg = "API key required. Set DATABENTO_API_KEY environment variable."
-            raise ValueError(msg)
+            raise MissingAPIKeyError
         self._client = db.Historical(key)
 
     def fetch(

@@ -4,7 +4,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from databento_cache.cli import main
-from databento_cache.exceptions import DownloadCancelledError
+from databento_cache.exceptions import DownloadCancelledError, MissingAPIKeyError
 from databento_cache.models import CachedData
 
 
@@ -178,9 +178,7 @@ class TestCliDownload:
         runner = CliRunner()
         with patch("databento_cache.cli.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
-            mock_cache.download.side_effect = ValueError(
-                "API key required. Set DATABENTO_API_KEY environment variable."
-            )
+            mock_cache.download.side_effect = MissingAPIKeyError()
 
             result = runner.invoke(
                 main,

@@ -6,6 +6,7 @@ from .exceptions import (
     CacheMissError,
     DownloadCancelledError,
     EmptyDataError,
+    MissingAPIKeyError,
     PartialCacheError,
 )
 from .models import (
@@ -34,6 +35,7 @@ __all__ = [
     "DownloadProgress",
     "DownloadStatus",
     "EmptyDataError",
+    "MissingAPIKeyError",
     "PartialCacheError",
     "PartitionInfo",
 ]

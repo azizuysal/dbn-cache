@@ -1,7 +1,13 @@
+from __future__ import annotations
+
 import re
 from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import CachedDataInfo, DateRange
 
 TICK_SCHEMAS = frozenset(
     {"trades", "mbp-1", "mbp-10", "mbo", "tbbo", "bbo-1s", "bbo-1m"}
@@ -138,3 +144,29 @@ def find_missing_date_ranges(
         missing.append((current, end))
 
     return missing
+
+
+def has_lookahead_bias(symbol: str) -> bool:
+    """Check if symbol uses volume/OI-based rolls which have look-ahead bias.
+
+    Returns True for .v. (volume) and .n. (OI) continuous futures.
+    """
+    return ".v." in symbol or ".n." in symbol
+
+
+def parse_date(value: str) -> date:
+    """Parse date string (YYYY-MM-DD) to date object."""
+    return date.fromisoformat(value)
+
+
+def format_date_ranges(ranges: list[DateRange]) -> str:
+    """Format date ranges for display."""
+    return ", ".join(f"{r.start} to {r.end}" for r in ranges)
+
+
+def filter_by_symbol_prefix(
+    items: list[CachedDataInfo], symbol: str
+) -> list[CachedDataInfo]:
+    """Filter cached data items by case-insensitive symbol prefix match."""
+    symbol_lower = symbol.lower()
+    return [item for item in items if item.symbol.lower().startswith(symbol_lower)]
