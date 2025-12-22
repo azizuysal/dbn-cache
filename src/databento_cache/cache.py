@@ -184,7 +184,7 @@ class DataCache:
             dataset=dataset,
         )
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        df = pl.from_pandas(data.to_df())
+        df = pl.from_pandas(data.to_df().reset_index())
         df.write_parquet(dest_path)
 
     def _get_cached_files(
