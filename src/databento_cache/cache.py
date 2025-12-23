@@ -382,8 +382,17 @@ class DataCache:
         schema: str,
         missing: list[DateRange],
         base_path: Path,
+        request_start: date,
+        request_end: date,
     ) -> tuple[int, list[tuple[PartitionInfo, Path, date, date]]]:
         """Count partitions that need downloading and build download list.
+
+        Args:
+            schema: Data schema
+            missing: List of missing date ranges
+            base_path: Base path for partition files
+            request_start: Original request start date
+            request_end: Original request end date
 
         Returns:
             Tuple of (total count, list of partition download info).
@@ -398,14 +407,22 @@ class DataCache:
                         info = PartitionInfo(year=d.year, month=d.month, day=d.day)
                         partitions.append((info, dest, d, d))
             else:
+                # Track seen partitions to avoid duplicates when gaps span months
+                seen: set[tuple[int, int]] = set()
                 for year, month in iter_months(gap.start, gap.end):
+                    if (year, month) in seen:
+                        continue
+                    seen.add((year, month))
+
                     dest = get_partition_path(base_path, schema, year, month)
-                    if not dest.exists():
-                        m_start, m_end = month_start_end(year, month)
-                        dl_start = max(m_start, gap.start)
-                        dl_end = min(m_end, gap.end)
-                        info = PartitionInfo(year=year, month=month)
-                        partitions.append((info, dest, dl_start, dl_end))
+                    m_start, m_end = month_start_end(year, month)
+                    # Use full request range for this month, not just the gap
+                    dl_start = max(m_start, request_start)
+                    dl_end = min(m_end, request_end)
+                    info = PartitionInfo(year=year, month=month)
+                    # Always include - if there's a gap in this month, we need to
+                    # re-download the partition even if the file exists
+                    partitions.append((info, dest, dl_start, dl_end))
 
         return len(partitions), partitions
 
@@ -479,7 +496,7 @@ class DataCache:
                 return CachedData(files, start=start, end=end)
 
             total, partitions = self._count_partitions_to_download(
-                schema, missing, base_path
+                schema, missing, base_path, start, end
             )
 
             if total == 0:
