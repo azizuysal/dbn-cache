@@ -476,7 +476,7 @@ class DataCache:
 
             if not missing:
                 files = self._get_cached_files(dataset, symbol, schema, start, end)
-                return CachedData(files)
+                return CachedData(files, start=start, end=end)
 
             total, partitions = self._count_partitions_to_download(
                 schema, missing, base_path
@@ -484,7 +484,7 @@ class DataCache:
 
             if total == 0:
                 files = self._get_cached_files(dataset, symbol, schema, start, end)
-                return CachedData(files)
+                return CachedData(files, start=start, end=end)
 
             completed_ranges: list[DateRange] = list(cached_ranges)
 
@@ -568,7 +568,7 @@ class DataCache:
             meta_path.unlink(missing_ok=True)
             raise EmptyDataError(symbol, dataset)
 
-        return CachedData(files)
+        return CachedData(files, start=start, end=end)
 
     def get(
         self,
@@ -602,7 +602,7 @@ class DataCache:
             raise CacheMissError(msg)
 
         files = self._get_cached_files(dataset, symbol, schema, start, end)
-        return CachedData(files)
+        return CachedData(files, start=start, end=end)
 
     def ensure(
         self,

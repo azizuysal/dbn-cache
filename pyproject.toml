@@ -1,6 +1,6 @@
 [project]
 name = "databento-cache"
-version = "1.0.0"
+version = "1.0.1"
 description = "Download and cache historical market data from Databento"
 requires-python = ">=3.13"
 dependencies = [

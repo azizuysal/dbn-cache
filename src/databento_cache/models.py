@@ -120,22 +120,57 @@ class CachedDataInfo(BaseModel):
 class CachedData:
     """Wrapper for cached parquet files with multi-library access."""
 
-    def __init__(self, paths: list[Path]) -> None:
+    def __init__(
+        self,
+        paths: list[Path],
+        start: date | None = None,
+        end: date | None = None,
+    ) -> None:
         self._paths = sorted(paths)
+        self._start = start
+        self._end = end
 
     @property
     def paths(self) -> list[Path]:
         """Get paths to cached parquet files."""
         return self._paths
 
+    def _apply_date_filter(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        """Apply date range filter to LazyFrame using ts_event column."""
+        if self._start is None and self._end is None:
+            return lf
+
+        # Check if ts_event column exists
+        schema = lf.collect_schema()
+        if "ts_event" not in schema:
+            return lf
+
+        # ts_event is in nanoseconds since UNIX epoch
+        # Convert dates to nanosecond timestamps
+        # end date is inclusive, so we need to include the entire day
+        if self._start is not None:
+            start_ns = int(
+                datetime.combine(self._start, datetime.min.time()).timestamp() * 1e9
+            )
+            lf = lf.filter(pl.col("ts_event") >= start_ns)
+
+        if self._end is not None:
+            # End of day (23:59:59.999999999) for inclusive end date
+            end_dt = datetime.combine(self._end, datetime.min.time())
+            end_ns = int((end_dt.timestamp() + 86400) * 1e9) - 1
+            lf = lf.filter(pl.col("ts_event") <= end_ns)
+
+        return lf
+
     def to_polars(self) -> pl.LazyFrame:
-        """Load data as Polars LazyFrame."""
+        """Load data as Polars LazyFrame, filtered to requested date range."""
         if not self._paths:
             return pl.LazyFrame()
-        return pl.scan_parquet(self._paths)
+        lf = pl.scan_parquet(self._paths)
+        return self._apply_date_filter(lf)
 
     def to_pandas(self) -> pd.DataFrame:
-        """Load data as Pandas DataFrame."""
+        """Load data as Pandas DataFrame, filtered to requested date range."""
         if not self._paths:
             return pd.DataFrame()
         lf = self.to_polars()
