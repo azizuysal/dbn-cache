@@ -18,6 +18,8 @@ pip install dbn-cache
 uv tool install dbn-cache
 # or
 pipx install dbn-cache
+# or
+mise use -g pipx:dbn-cache
 ```
 
 ## Configuration
