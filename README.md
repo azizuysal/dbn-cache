@@ -1,4 +1,4 @@
-# databento-cache
+# dbn-cache
 
 Download and cache historical market data from Databento.
 
@@ -7,17 +7,17 @@ Download and cache historical market data from Databento.
 ### As a library
 
 ```bash
-uv add databento-cache
+uv add dbn-cache
 # or
-pip install databento-cache
+pip install dbn-cache
 ```
 
 ### CLI only (global install)
 
 ```bash
-uv tool install databento-cache
+uv tool install dbn-cache
 # or
-pipx install databento-cache
+pipx install dbn-cache
 ```
 
 ## Configuration
@@ -36,7 +36,7 @@ export DATABENTO_CACHE_DIR=/path/to/cache
 
 ## CLI Usage
 
-The CLI is available as `dbn` (or `databento-cache`):
+The CLI is available as `dbn` (or `dbn-cache`):
 
 ```bash
 # Show help
@@ -98,7 +98,7 @@ dbn completions fish > ~/.config/fish/completions/dbn.fish
 
 ```python
 from datetime import date
-from databento_cache import DataCache
+from dbn_cache import DataCache
 
 # Initialize cache (uses ~/.databento by default)
 cache = DataCache()
@@ -126,7 +126,7 @@ if result.has_errors:
         print(f"  {item.symbol}/{item.schema_}: {error}")
 
 # Get cached data (raises CacheMissError if not cached)
-from databento_cache import CacheMissError
+from dbn_cache import CacheMissError
 
 try:
     data = cache.get("ES.c.0", "ohlcv-1m", date(2024, 1, 1), date(2024, 12, 1))

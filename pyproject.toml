@@ -1,6 +1,6 @@
 [project]
-name = "databento-cache"
-version = "1.0.1"
+name = "dbn-cache"
+version = "1.0.2"
 description = "Download and cache historical market data from Databento"
 requires-python = ">=3.13"
 dependencies = [
@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-dbn = "databento_cache.cli:main"
-databento-cache = "databento_cache.cli:main"
+dbn = "dbn_cache.cli:main"
+dbn-cache = "dbn_cache.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-cov>=6.0", "ruff>=0.8", "pyright>=1.1", "pandas-stubs>=2.0"]

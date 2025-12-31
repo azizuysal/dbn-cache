@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from databento_cache.utils import (
+from dbn_cache.utils import (
     detect_stype,
     find_missing_date_ranges,
     get_partition_path,

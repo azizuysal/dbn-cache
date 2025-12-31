@@ -4,9 +4,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from databento_cache.cache import DataCache
-from databento_cache.exceptions import CacheMissError
-from databento_cache.models import DateRange, SymbolMeta
+from dbn_cache.cache import DataCache
+from dbn_cache.exceptions import CacheMissError
+from dbn_cache.models import DateRange, SymbolMeta
 
 
 class TestDataCacheInit:

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import polars as pl
 
-from databento_cache.models import (
+from dbn_cache.models import (
     CachedData,
     CachedDataInfo,
     ContractSpecs,
