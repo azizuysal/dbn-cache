@@ -288,14 +288,18 @@ class DataCache:
         dest_path: Path,
     ) -> None:
         """Download data for a partition and save to dest_path."""
+        from datetime import timedelta
+
         import polars as pl
 
         client = self._get_client()
+        # Databento API end date is exclusive, so add 1 day
+        api_end = end + timedelta(days=1)
         data = client.fetch(
             symbol=symbol,
             schema=schema,
             start=start,
-            end=end,
+            end=api_end,
             dataset=dataset,
         )
         dest_path.parent.mkdir(parents=True, exist_ok=True)

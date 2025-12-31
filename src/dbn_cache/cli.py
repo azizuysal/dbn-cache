@@ -720,15 +720,19 @@ def symbols() -> None:
 
 
 @main.command()
-@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish", "powershell"]))
 def completions(shell: str) -> None:
     """Generate shell completion script.
 
     \b
-    Usage:
-      eval "$(dbn completions zsh)"   # Add to .zshrc/.bashrc
-      eval "$(dbn completions bash)"
+    Usage (Unix):
+      eval "$(dbn completions zsh)"   # Add to .zshrc
+      eval "$(dbn completions bash)"  # Add to .bashrc
       dbn completions fish > ~/.config/fish/completions/dbn.fish
+
+    \b
+    Usage (Windows PowerShell):
+      dbn completions powershell >> $PROFILE
     """
     import os
     import subprocess

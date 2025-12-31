@@ -28,11 +28,15 @@ Set your Databento API key:
 export DATABENTO_API_KEY=db-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-Optionally configure cache location (default: `~/.databento`):
+Optionally configure cache location:
 
 ```bash
 export DATABENTO_CACHE_DIR=/path/to/cache
 ```
+
+Default cache locations:
+- **Unix/Mac:** `~/.databento`
+- **Windows:** `%LOCALAPPDATA%\databento`
 
 ## CLI Usage
 
@@ -48,6 +52,9 @@ dbn download ES.c.0 --schema ohlcv-1m --start 2024-01-01 --end 2024-12-01
 
 # Download specific contract
 dbn download ESZ24 --schema trades --start 2024-11-01 --end 2024-12-01
+
+# Download from different dataset (default: GLBX.MDP3)
+dbn download AAPL --schema trades --start 2024-01-01 --end 2024-01-31 -d XNAS.ITCH
 
 # Update cached data to yesterday (historical data has 24h delay)
 dbn update ES.c.0                # Update all schemas for symbol
@@ -87,6 +94,9 @@ eval "$(dbn completions bash)"
 
 # Fish
 dbn completions fish > ~/.config/fish/completions/dbn.fish
+
+# PowerShell (Windows)
+dbn completions powershell >> $PROFILE
 ```
 
 ## Cancellation & Error Handling
@@ -139,35 +149,40 @@ for issue in issues:
     print(f"{issue.date}: {issue.issue_type}")
 
 # Custom cache location
+from pathlib import Path
 cache = DataCache(cache_dir=Path("/path/to/cache"))
 ```
 
 ## Supported Symbols
 
-### Explicit Contracts
-- `ESZ24` - E-mini S&P 500, December 2024
-- `CLF25` - Crude Oil, January 2025
+### Stocks
+- `AAPL` - Apple Inc. (use with `-d XNAS.ITCH` or other equity datasets)
 
-### Continuous Futures
+### Options
+- `SPX.OPT` - All SPX options (use with `-d OPRA.PILLAR`)
+
+### Futures (CME Globex)
+- `ESZ24` - Specific contract (E-mini S&P 500, December 2024)
 - `ES.c.0` - Front month by calendar (safe for backtesting)
 - `ES.v.0` - Front month by volume (**has look-ahead bias**)
 - `ES.n.0` - Front month by open interest (**has look-ahead bias**)
+- `ES.FUT` - All contracts for a product
 
-### Parent Symbology
-- `ES.FUT` - All E-mini S&P 500 contracts
+Common products: `ES` (S&P 500), `NQ` (Nasdaq), `CL` (Crude Oil), `GC` (Gold), `6E` (Euro FX), `6J` (Yen), `ZB` (Treasury Bonds)
 
 ## Schemas
 
+Run `dbn schemas` for the full list. Common schemas:
+
 | Schema | Description | Partition |
 |--------|-------------|-----------|
-| `ohlcv-1d` | Daily OHLCV | Monthly |
-| `ohlcv-1h` | Hourly OHLCV | Monthly |
-| `ohlcv-1m` | 1-minute OHLCV | Monthly |
-| `ohlcv-1s` | 1-second OHLCV | Monthly |
-| `trades` | Individual trades | Daily |
-| `mbp-1` | Top of book | Daily |
-| `mbp-10` | 10 levels of book | Daily |
-| `mbo` | Market by order | Daily |
+| `trades` | Executed trades | Daily |
+| `ohlcv-1m` | 1-minute OHLCV bars | Monthly |
+| `ohlcv-1h` | Hourly OHLCV bars | Monthly |
+| `ohlcv-1d` | Daily OHLCV bars | Monthly |
+| `mbp-1` | Top of book (L1) | Daily |
+| `mbp-10` | 10 levels of book (L2) | Daily |
+| `mbo` | Full order book | Daily |
 
 ## Cache Structure
 

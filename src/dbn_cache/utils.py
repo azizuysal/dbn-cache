@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import sys
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -36,12 +38,12 @@ def detect_stype(symbol: str) -> str:
 
     Returns:
         'continuous' for ES.c.0, ES.v.0, ES.n.0
-        'parent' for ES.FUT
-        'raw_symbol' for ESZ24
+        'parent' for ES.FUT, SPX.OPT, BTC.SPOT
+        'raw_symbol' for ESZ24, AAPL
     """
     if re.match(r"^[A-Z0-9]+\.[cvn]\.\d+$", symbol):
         return "continuous"
-    if re.match(r"^[A-Z0-9]+\.FUT$", symbol):
+    if re.match(r"^[A-Z0-9]+\.(FUT|OPT|SPOT)$", symbol):
         return "parent"
     return "raw_symbol"
 
@@ -52,7 +54,17 @@ def is_tick_schema(schema: str) -> bool:
 
 
 def get_default_cache_dir() -> Path:
-    """Get default cache directory (~/.databento)."""
+    """Get default cache directory.
+
+    Returns:
+        - Windows: %LOCALAPPDATA%\\databento
+        - Unix/Mac: ~/.databento
+    """
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "databento"
+        return Path.home() / "AppData" / "Local" / "databento"
     return Path.home() / ".databento"
 
 
