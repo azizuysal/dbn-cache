@@ -3,9 +3,11 @@
     "databento",
     "filelock",
     "ohlcv",
+    "pyarrow",
     "pycache",
     "Pydantic",
     "pyproject",
-    "pytest"
+    "pytest",
+    "testpaths"
   ]
 }

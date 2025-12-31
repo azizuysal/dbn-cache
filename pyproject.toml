@@ -2,7 +2,21 @@
 name = "dbn-cache"
 version = "1.0.2"
 description = "Download and cache historical market data from Databento"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Aziz Uysal" }]
+keywords = ["databento", "market-data", "trading", "finance", "cache", "backtesting"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
 requires-python = ">=3.13"
+
 dependencies = [
     "databento>=0.40",
     "polars>=1.0",
@@ -17,6 +31,11 @@ dependencies = [
 [project.scripts]
 dbn = "dbn_cache.cli:main"
 dbn-cache = "dbn_cache.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/azizuysal/dbn-cache"
+Repository = "https://github.com/azizuysal/dbn-cache"
+Issues = "https://github.com/azizuysal/dbn-cache/issues"
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-cov>=6.0", "ruff>=0.8", "pyright>=1.1", "pandas-stubs>=2.0"]
