@@ -292,6 +292,7 @@ class TestCliUpdate:
                     size_bytes=1024,
                 )
             ]
+            mock_cache.get_update_range.return_value = None
 
             result = runner.invoke(main, ["update", "ES.c.0", "-s", "ohlcv-1m"])
             assert result.exit_code == 0
@@ -310,6 +311,10 @@ class TestCliUpdate:
                     size_bytes=1024,
                 )
             ]
+            mock_cache.get_update_range.return_value = (
+                date(2024, 7, 1),
+                date(2024, 12, 31),
+            )
             mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
 
             result = runner.invoke(main, ["update", "ES.c.0", "-s", "ohlcv-1m"])
@@ -337,6 +342,10 @@ class TestCliUpdate:
                     size_bytes=2048,
                 ),
             ]
+            mock_cache.get_update_range.return_value = (
+                date(2024, 7, 1),
+                date(2024, 12, 31),
+            )
             mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
 
             result = runner.invoke(main, ["update", "ES.c.0"])
@@ -357,6 +366,10 @@ class TestCliUpdate:
                     size_bytes=1024,
                 )
             ]
+            mock_cache.get_update_range.return_value = (
+                date(2024, 7, 1),
+                date(2024, 12, 31),
+            )
             mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
 
             result = runner.invoke(main, ["update", "ES.v.0", "-s", "ohlcv-1m"])
@@ -383,6 +396,10 @@ class TestCliUpdate:
                     size_bytes=2048,
                 ),
             ]
+            mock_cache.get_update_range.return_value = (
+                date(2024, 7, 1),
+                date(2024, 12, 31),
+            )
             mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
 
             result = runner.invoke(main, ["update", "--all"])

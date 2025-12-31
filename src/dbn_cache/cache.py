@@ -776,6 +776,32 @@ class DataCache:
         except CacheMissError:
             return self.download(symbol, schema, start, end, dataset)
 
+    def get_update_range(
+        self,
+        cached_info: CachedDataInfo,
+        end: date | None = None,
+    ) -> tuple[date, date] | None:
+        """Get the date range needed to update cached data.
+
+        Args:
+            cached_info: Cached data info from list_cached()
+            end: End date (defaults to yesterday UTC)
+
+        Returns:
+            Tuple of (start, end) dates if update is needed, None if up to date.
+        """
+        if not cached_info.ranges:
+            return None
+
+        last_cached = cached_info.ranges[-1].end
+        start = last_cached + timedelta(days=1)
+        end_date = end or (utc_today() - timedelta(days=1))
+
+        if start > end_date:
+            return None
+
+        return (start, end_date)
+
     def update(
         self,
         symbol: str,
@@ -801,25 +827,18 @@ class DataCache:
         Raises:
             CacheMissError: If no existing cached data exists.
         """
-        all_cached = self.list_cached()
-        cached_info = None
-        for item in all_cached:
-            if item.symbol == symbol and item.schema_ == schema:
-                cached_info = item
-                break
+        cached_info = self.info(symbol, schema)
 
         if cached_info is None or not cached_info.ranges:
             raise CacheMissError(
                 f"No cached data for {symbol}/{schema}. Use download() first."
             )
 
-        last_cached = cached_info.ranges[-1].end
-        start = last_cached + timedelta(days=1)
-        end_date = end or (utc_today() - timedelta(days=1))
-
-        if start >= end_date:
+        update_range = self.get_update_range(cached_info, end)
+        if update_range is None:
             return None
 
+        start, end_date = update_range
         return self.download(
             symbol,
             schema,
@@ -856,19 +875,18 @@ class DataCache:
         errors: list[tuple[CachedDataInfo, Exception]] = []
 
         for item in all_cached:
-            last_cached = item.ranges[-1].end
-            start = last_cached + timedelta(days=1)
-
-            if start >= end_date:
+            update_range = self.get_update_range(item, end_date)
+            if update_range is None:
                 up_to_date.append(item)
                 continue
 
+            start, item_end = update_range
             try:
                 self.download(
                     item.symbol,
                     item.schema_,
                     start,
-                    end_date,
+                    item_end,
                     item.dataset,
                     on_progress=on_progress,
                     cancelled=cancelled,

@@ -1,7 +1,7 @@
 import signal
 import sys
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import date
 from functools import wraps
 from types import FrameType
 
@@ -35,7 +35,6 @@ from .utils import (
     format_date_ranges,
     has_lookahead_bias,
     parse_date,
-    utc_today,
 )
 
 console = Console()
@@ -436,7 +435,6 @@ def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
             )
         sys.exit(1)
 
-    end = utc_today() - timedelta(days=1)
     updated_count = 0
     up_to_date_count = 0
     error_count = 0
@@ -451,13 +449,12 @@ def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
                 f"(volume/OI-based rolls)[/yellow]"
             )
 
-        last_cached = item.ranges[-1].end
-        start = last_cached + timedelta(days=1)
-
-        if start >= end:
+        update_range = cache.get_update_range(item)
+        if update_range is None:
             up_to_date_count += 1
             continue
 
+        start, end = update_range
         console.print(
             f"Updating [cyan]{item.symbol}[/cyan]/[blue]{item.schema_}[/blue] "
             f"from {start} to {end}"
