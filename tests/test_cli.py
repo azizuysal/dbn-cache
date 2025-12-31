@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -5,7 +6,7 @@ from click.testing import CliRunner
 
 from databento_cache.cli import main
 from databento_cache.exceptions import DownloadCancelledError, MissingAPIKeyError
-from databento_cache.models import CachedData
+from databento_cache.models import CachedData, CachedDataInfo, DateRange
 
 
 class TestCliHelp:
@@ -244,3 +245,168 @@ class TestCliCost:
             )
             assert result.exit_code == 0
             assert "$12.50" in result.output
+
+
+class TestCliUpdate:
+    def test_update_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["update", "-h"])
+        assert result.exit_code == 0
+        assert "Update cached data from last cached date to yesterday" in result.output
+        assert "--schema" in result.output
+        assert "--all" in result.output
+
+    def test_update_no_symbol_no_all(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["update"])
+        assert result.exit_code == 1
+        assert "Either provide a SYMBOL or use --all flag" in result.output
+
+    def test_update_symbol_and_all(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["update", "ES.c.0", "--all"])
+        assert result.exit_code == 1
+        assert "Cannot use both SYMBOL and --all flag" in result.output
+
+    def test_update_no_cached_data(self) -> None:
+        runner = CliRunner()
+        with patch("databento_cache.cli.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = []
+
+            result = runner.invoke(main, ["update", "ES.c.0", "-s", "ohlcv-1m"])
+            assert result.exit_code == 1
+            assert "No Cached Data" in result.output
+            assert "dbn download" in result.output
+
+    def test_update_already_up_to_date(self) -> None:
+        runner = CliRunner()
+        with patch("databento_cache.cli.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="ES.c.0",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2024, 1, 1), end=date.today())],
+                    size_bytes=1024,
+                )
+            ]
+
+            result = runner.invoke(main, ["update", "ES.c.0", "-s", "ohlcv-1m"])
+            assert result.exit_code == 0
+            assert "already up to date" in result.output
+
+    def test_update_success(self) -> None:
+        runner = CliRunner()
+        with patch("databento_cache.cli.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="ES.c.0",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 6, 30))],
+                    size_bytes=1024,
+                )
+            ]
+            mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
+
+            result = runner.invoke(main, ["update", "ES.c.0", "-s", "ohlcv-1m"])
+            assert result.exit_code == 0
+            assert "Updating" in result.output
+            assert "Updated 1 item" in result.output
+
+    def test_update_all_schemas(self) -> None:
+        runner = CliRunner()
+        with patch("databento_cache.cli.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="ES.c.0",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 6, 30))],
+                    size_bytes=1024,
+                ),
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="ES.c.0",
+                    schema="trades",
+                    ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 6, 30))],
+                    size_bytes=2048,
+                ),
+            ]
+            mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
+
+            result = runner.invoke(main, ["update", "ES.c.0"])
+            assert result.exit_code == 0
+            assert "ohlcv-1m" in result.output
+            assert "trades" in result.output
+
+    def test_update_lookahead_bias_warning(self) -> None:
+        runner = CliRunner()
+        with patch("databento_cache.cli.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="ES.v.0",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 6, 30))],
+                    size_bytes=1024,
+                )
+            ]
+            mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
+
+            result = runner.invoke(main, ["update", "ES.v.0", "-s", "ohlcv-1m"])
+            assert result.exit_code == 0
+            assert "look-ahead bias" in result.output
+
+    def test_update_all_flag(self) -> None:
+        runner = CliRunner()
+        with patch("databento_cache.cli.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="ES.c.0",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 6, 30))],
+                    size_bytes=1024,
+                ),
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="NQ.c.0",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 6, 30))],
+                    size_bytes=2048,
+                ),
+            ]
+            mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
+
+            result = runner.invoke(main, ["update", "--all"])
+            assert result.exit_code == 0
+            assert "ES.c.0" in result.output
+            assert "NQ.c.0" in result.output
+            assert "Updated 2 item" in result.output
+
+    def test_update_all_empty_cache(self) -> None:
+        runner = CliRunner()
+        with patch("databento_cache.cli.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = []
+
+            result = runner.invoke(main, ["update", "--all"])
+            assert result.exit_code == 1
+            assert "No cached data found" in result.output
+
+    def test_update_no_symbol_no_cached_data(self) -> None:
+        runner = CliRunner()
+        with patch("databento_cache.cli.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = []
+
+            result = runner.invoke(main, ["update", "ES.c.0"])
+            assert result.exit_code == 1
+            assert "No Cached Data" in result.output

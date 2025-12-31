@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import warnings
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,6 +25,7 @@ from .models import (
     DownloadStatus,
     PartitionInfo,
     SymbolMeta,
+    UpdateAllResult,
 )
 from .utils import (
     detect_stype,
@@ -38,6 +39,7 @@ from .utils import (
     merge_date_ranges,
     month_start_end,
     normalize_symbol,
+    utc_today,
 )
 
 if TYPE_CHECKING:
@@ -77,6 +79,51 @@ def _parse_quality_warnings(
                     pass
 
     return sorted(issues, key=lambda i: i.date)
+
+
+def _get_actual_date_range(parquet_path: Path) -> tuple[date, date] | None:
+    """Get the actual date range from timestamps in a parquet file.
+
+    Returns:
+        Tuple of (start_date, end_date) based on actual data, or None if empty.
+    """
+    df = pl.scan_parquet(parquet_path)
+    schema = df.collect_schema()
+
+    # Find timestamp column (ts_event for databento, ts for tests)
+    ts_col: str | None = None
+    for col in ["ts_event", "ts"]:
+        if col in schema:
+            ts_col = col
+            break
+
+    if ts_col is None:
+        return None
+
+    # Check if column is a datetime type
+    col_type = schema[ts_col]
+    if not (col_type == pl.Datetime or str(col_type).startswith("Datetime")):
+        return None  # Skip if not a datetime column (e.g., test data with int)
+
+    result = df.select(
+        pl.col(ts_col).min().alias("min_ts"),
+        pl.col(ts_col).max().alias("max_ts"),
+    ).collect()
+
+    if result.is_empty():
+        return None
+
+    min_ts = result["min_ts"][0]
+    max_ts = result["max_ts"][0]
+
+    if min_ts is None or max_ts is None:
+        return None
+
+    # Convert to date (timestamps are in UTC)
+    start_date = min_ts.date()
+    end_date = max_ts.date()
+
+    return start_date, end_date
 
 
 class DataCache:
@@ -134,13 +181,81 @@ class DataCache:
             yield
 
     def _load_meta(self, dataset: str, symbol: str, schema: str) -> SymbolMeta | None:
-        """Load metadata from cache."""
+        """Load metadata from cache, auto-fixing if dates don't match actual data."""
         meta_path = self._get_meta_path(dataset, symbol, schema)
         if not meta_path.exists():
             return None
         with meta_path.open() as f:
             data = json.load(f)
-        return SymbolMeta.model_validate(data)
+        meta = SymbolMeta.model_validate(data)
+
+        # Auto-heal: verify metadata matches actual parquet data
+        fixed_meta = self._validate_and_fix_meta(meta)
+        if fixed_meta is not None:
+            old_end = meta.ranges[-1].end if meta.ranges else None
+            new_end = fixed_meta.ranges[-1].end if fixed_meta.ranges else None
+            logger.warning(
+                "Auto-fixed metadata for %s/%s: %s -> %s",
+                meta.symbol,
+                meta.schema_,
+                old_end,
+                new_end,
+            )
+            self._save_meta(fixed_meta)
+            return fixed_meta
+
+        return meta
+
+    def _validate_and_fix_meta(self, meta: SymbolMeta) -> SymbolMeta | None:
+        """Validate metadata against actual parquet files and fix if needed.
+
+        Returns:
+            Updated SymbolMeta if fixes were needed, None if metadata is correct.
+        """
+        base_path = self._get_symbol_path(meta.dataset, meta.symbol, meta.schema_)
+        parquet_files = list(base_path.glob("**/*.parquet"))
+
+        if not parquet_files:
+            return None
+
+        # Get actual date range from all parquet files
+        all_min: date | None = None
+        all_max: date | None = None
+
+        for pf in parquet_files:
+            actual_range = _get_actual_date_range(pf)
+            if actual_range:
+                file_min, file_max = actual_range
+                if all_min is None or file_min < all_min:
+                    all_min = file_min
+                if all_max is None or file_max > all_max:
+                    all_max = file_max
+
+        if all_min is None or all_max is None:
+            return None
+
+        # Check if metadata matches actual data
+        if not meta.ranges:
+            return None
+
+        meta_start = meta.ranges[0].start
+        meta_end = meta.ranges[-1].end
+
+        if meta_start == all_min and meta_end == all_max:
+            return None  # Metadata is correct
+
+        # Fix metadata with actual dates
+        return SymbolMeta(
+            dataset=meta.dataset,
+            symbol=meta.symbol,
+            stype=meta.stype,
+            schema=meta.schema_,
+            ranges=[DateRange(start=all_min, end=all_max)],
+            updated_at=datetime.now(),
+            cache_version=meta.cache_version,
+            contract_specs=meta.contract_specs,
+            quality_issues=meta.quality_issues,
+        )
 
     def _save_meta(self, meta: SymbolMeta) -> None:
         """Save metadata to cache."""
@@ -545,7 +660,18 @@ class DataCache:
                             tmp_path.unlink(missing_ok=True)
                             raise
 
-                        completed_ranges.append(DateRange(start=dl_start, end=dl_end))
+                        # Use actual date range from data, not requested dates
+                        actual_range = _get_actual_date_range(dest)
+                        if actual_range:
+                            actual_start, actual_end = actual_range
+                            completed_ranges.append(
+                                DateRange(start=actual_start, end=actual_end)
+                            )
+                        else:
+                            # Fallback to requested dates if file is empty
+                            completed_ranges.append(
+                                DateRange(start=dl_start, end=dl_end)
+                            )
                         self._save_incremental_meta(
                             dataset, symbol, schema, completed_ranges
                         )
@@ -645,6 +771,113 @@ class DataCache:
             return self.get(symbol, schema, start, end, dataset)
         except CacheMissError:
             return self.download(symbol, schema, start, end, dataset)
+
+    def update(
+        self,
+        symbol: str,
+        schema: str,
+        end: date | None = None,
+        on_progress: "Callable[[DownloadProgress], None] | None" = None,
+        cancelled: "Callable[[], bool] | None" = None,
+    ) -> CachedData | None:
+        """Update cached data from last cached date to yesterday (UTC).
+
+        Historical data has a 24-hour embargo, so yesterday UTC is the default.
+
+        Args:
+            symbol: Symbol to update
+            schema: Data schema
+            end: End date (defaults to yesterday)
+            on_progress: Progress callback
+            cancelled: Cancellation check callback
+
+        Returns:
+            CachedData if new data was downloaded, None if already up to date.
+
+        Raises:
+            CacheMissError: If no existing cached data exists.
+        """
+        all_cached = self.list_cached()
+        cached_info = None
+        for item in all_cached:
+            if item.symbol == symbol and item.schema_ == schema:
+                cached_info = item
+                break
+
+        if cached_info is None or not cached_info.ranges:
+            raise CacheMissError(
+                f"No cached data for {symbol}/{schema}. Use download() first."
+            )
+
+        last_cached = cached_info.ranges[-1].end
+        start = last_cached + timedelta(days=1)
+        end_date = end or (utc_today() - timedelta(days=1))
+
+        if start >= end_date:
+            return None
+
+        return self.download(
+            symbol,
+            schema,
+            start,
+            end_date,
+            cached_info.dataset,
+            on_progress=on_progress,
+            cancelled=cancelled,
+        )
+
+    def update_all(
+        self,
+        end: date | None = None,
+        on_progress: "Callable[[DownloadProgress], None] | None" = None,
+        cancelled: "Callable[[], bool] | None" = None,
+    ) -> "UpdateAllResult":
+        """Update all cached data from last cached date to yesterday (UTC).
+
+        Historical data has a 24-hour embargo, so yesterday UTC is the default.
+
+        Args:
+            end: End date (defaults to yesterday)
+            on_progress: Progress callback (called for each item)
+            cancelled: Cancellation check callback
+
+        Returns:
+            UpdateAllResult with counts and any errors.
+        """
+        all_cached = self.list_cached()
+        end_date = end or (utc_today() - timedelta(days=1))
+
+        updated: list[CachedDataInfo] = []
+        up_to_date: list[CachedDataInfo] = []
+        errors: list[tuple[CachedDataInfo, Exception]] = []
+
+        for item in all_cached:
+            last_cached = item.ranges[-1].end
+            start = last_cached + timedelta(days=1)
+
+            if start >= end_date:
+                up_to_date.append(item)
+                continue
+
+            try:
+                self.download(
+                    item.symbol,
+                    item.schema_,
+                    start,
+                    end_date,
+                    item.dataset,
+                    on_progress=on_progress,
+                    cancelled=cancelled,
+                )
+                updated.append(item)
+            except Exception as e:
+                errors.append((item, e))
+
+        return UpdateAllResult(
+            updated=updated,
+            up_to_date=up_to_date,
+            errors=errors,
+        )
 
     def list_cached(self, dataset: str | None = None) -> list[CachedDataInfo]:
         """List all cached data.

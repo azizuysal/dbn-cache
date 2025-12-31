@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +15,15 @@ TICK_SCHEMAS = frozenset(
 OHLCV_SCHEMAS = frozenset(
     {"ohlcv-1s", "ohlcv-1m", "ohlcv-1h", "ohlcv-1d", "statistics"}
 )
+
+
+def utc_today() -> date:
+    """Get today's date in UTC timezone.
+
+    Uses UTC instead of local time for consistency across different timezones.
+    This ensures the same date is used regardless of where the code runs.
+    """
+    return datetime.now(UTC).date()
 
 
 def normalize_symbol(symbol: str) -> str:

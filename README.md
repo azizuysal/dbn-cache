@@ -49,6 +49,11 @@ dbn download ES.c.0 --schema ohlcv-1m --start 2024-01-01 --end 2024-12-01
 # Download specific contract
 dbn download ESZ24 --schema trades --start 2024-11-01 --end 2024-12-01
 
+# Update cached data to yesterday (historical data has 24h delay)
+dbn update ES.c.0                # Update all schemas for symbol
+dbn update ES.c.0 -s ohlcv-1m    # Update specific schema
+dbn update --all                  # Update everything in cache
+
 # List cached data
 dbn list
 
@@ -109,6 +114,16 @@ df = data.to_pandas()
 
 # Ensure data is cached (downloads only if missing)
 data = cache.ensure("ES.c.0", "ohlcv-1m", date(2024, 1, 1), date(2024, 12, 1))
+
+# Update cached data to yesterday (returns None if already up to date)
+data = cache.update("ES.c.0", "ohlcv-1m")  # Dataset inferred from cache
+
+# Update all cached data
+result = cache.update_all()
+print(f"Updated: {result.updated_count}, Up to date: {result.up_to_date_count}")
+if result.has_errors:
+    for item, error in result.errors:
+        print(f"  {item.symbol}/{item.schema_}: {error}")
 
 # Get cached data (raises CacheMissError if not cached)
 from databento_cache import CacheMissError

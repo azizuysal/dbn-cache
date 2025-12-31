@@ -117,6 +117,31 @@ class CachedDataInfo(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+@dataclass
+class UpdateAllResult:
+    """Result of update_all() operation."""
+
+    updated: list[CachedDataInfo]
+    up_to_date: list[CachedDataInfo]
+    errors: list[tuple[CachedDataInfo, Exception]]
+
+    @property
+    def updated_count(self) -> int:
+        return len(self.updated)
+
+    @property
+    def up_to_date_count(self) -> int:
+        return len(self.up_to_date)
+
+    @property
+    def error_count(self) -> int:
+        return len(self.errors)
+
+    @property
+    def has_errors(self) -> bool:
+        return len(self.errors) > 0
+
+
 class CachedData:
     """Wrapper for cached parquet files with multi-library access."""
 

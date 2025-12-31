@@ -149,3 +149,74 @@ class TestDataCacheListCached:
         items = cache.list_cached()
         assert len(items) == 1
         assert items[0].symbol == "ES.c.0"
+
+
+class TestDataCacheUpdate:
+    def test_update_no_cached_data(self, tmp_path: Path) -> None:
+        cache = DataCache(cache_dir=tmp_path)
+        with pytest.raises(CacheMissError, match="No cached data"):
+            cache.update("ES.c.0", "ohlcv-1m")
+
+    def test_update_already_up_to_date(self, tmp_path: Path) -> None:
+        cache = DataCache(cache_dir=tmp_path)
+
+        base_path = tmp_path / "GLBX.MDP3" / "ES_c_0" / "ohlcv-1m"
+        base_path.mkdir(parents=True)
+        (base_path / "2024").mkdir()
+        df = pl.DataFrame({"ts": [1, 2, 3]})
+        df.write_parquet(base_path / "2024" / "12.parquet")
+
+        meta_path = base_path / "meta.json"
+        meta = SymbolMeta(
+            dataset="GLBX.MDP3",
+            symbol="ES.c.0",
+            stype="continuous",
+            schema="ohlcv-1m",
+            ranges=[DateRange(start=date(2024, 1, 1), end=date.today())],
+            updated_at=datetime.now(),
+        )
+        import json
+
+        with meta_path.open("w") as f:
+            json.dump(meta.model_dump(by_alias=True), f, default=str)
+
+        result = cache.update("ES.c.0", "ohlcv-1m")
+        assert result is None
+
+
+class TestDataCacheUpdateAll:
+    def test_update_all_empty_cache(self, tmp_path: Path) -> None:
+        cache = DataCache(cache_dir=tmp_path)
+        result = cache.update_all()
+        assert result.updated_count == 0
+        assert result.up_to_date_count == 0
+        assert result.error_count == 0
+
+    def test_update_all_already_up_to_date(self, tmp_path: Path) -> None:
+        cache = DataCache(cache_dir=tmp_path)
+
+        base_path = tmp_path / "GLBX.MDP3" / "ES_c_0" / "ohlcv-1m"
+        base_path.mkdir(parents=True)
+        (base_path / "2024").mkdir()
+        df = pl.DataFrame({"ts": [1, 2, 3]})
+        df.write_parquet(base_path / "2024" / "12.parquet")
+
+        meta_path = base_path / "meta.json"
+        meta = SymbolMeta(
+            dataset="GLBX.MDP3",
+            symbol="ES.c.0",
+            stype="continuous",
+            schema="ohlcv-1m",
+            ranges=[DateRange(start=date(2024, 1, 1), end=date.today())],
+            updated_at=datetime.now(),
+        )
+        import json
+
+        with meta_path.open("w") as f:
+            json.dump(meta.model_dump(by_alias=True), f, default=str)
+
+        result = cache.update_all()
+        assert result.updated_count == 0
+        assert result.up_to_date_count == 1
+        assert result.error_count == 0
+        assert not result.has_errors

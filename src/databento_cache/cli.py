@@ -1,6 +1,8 @@
 import signal
 import sys
-from datetime import date
+from collections.abc import Callable
+from datetime import date, timedelta
+from functools import wraps
 from types import FrameType
 
 import click
@@ -33,6 +35,7 @@ from .utils import (
     format_date_ranges,
     has_lookahead_bias,
     parse_date,
+    utc_today,
 )
 
 console = Console()
@@ -168,6 +171,85 @@ def _do_download(
         signal.signal(signal.SIGINT, original_handler)
 
 
+def _handle_download_errors[**P, T](func: Callable[P, T]) -> Callable[P, T]:
+    """Decorator to handle common download errors."""
+
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        try:
+            return func(*args, **kwargs)
+        except DownloadCancelledError as e:
+            console.print(
+                Panel(
+                    f"Download cancelled.\n"
+                    f"Completed: [green]{e.completed}[/green] / {e.total} partitions\n"
+                    f"Partial data saved. Re-run to resume.",
+                    title="Cancelled",
+                    border_style="yellow",
+                    expand=False,
+                )
+            )
+            sys.exit(130)
+        except EmptyDataError as e:
+            console.print(
+                Panel(
+                    f"No data returned for [cyan]{e.symbol}[/cyan].\n\n"
+                    "This usually means the symbol doesn't exist in the dataset.\n"
+                    f"[dim]Dataset: {e.dataset}[/dim]",
+                    title="Empty Data",
+                    border_style="yellow",
+                    expand=False,
+                )
+            )
+            sys.exit(1)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled[/yellow]")
+            sys.exit(130)
+        except PermissionError as e:
+            console.print(
+                Panel(
+                    f"[red]Permission denied:[/red] {e.filename}",
+                    title="Error",
+                    border_style="red",
+                    expand=False,
+                )
+            )
+            sys.exit(1)
+        except OSError as e:
+            console.print(
+                Panel(
+                    f"[red]Storage error:[/red] {e}",
+                    title="Error",
+                    border_style="red",
+                    expand=False,
+                )
+            )
+            sys.exit(1)
+        except MissingAPIKeyError:
+            console.print(
+                Panel(
+                    "Missing API key. Set the [cyan]DATABENTO_API_KEY[/cyan] "
+                    "environment variable.",
+                    title="Configuration Error",
+                    border_style="red",
+                    expand=False,
+                )
+            )
+            sys.exit(1)
+        except Exception as e:
+            console.print(
+                Panel(
+                    f"[red]{type(e).__name__}:[/red] {e}",
+                    title="Error",
+                    border_style="red",
+                    expand=False,
+                )
+            )
+            sys.exit(1)
+
+    return wrapper
+
+
 def _display_data_quality_issues(issues: list[DataQualityIssue]) -> None:
     """Display data quality issues in a professional format."""
     dates_str = ", ".join(str(i.date) for i in issues)
@@ -193,6 +275,7 @@ def _display_data_quality_issues(issues: list[DataQualityIssue]) -> None:
 @click.option("--end", required=True, type=parse_date, help="End date (YYYY-MM-DD)")
 @click.option("--dataset", "-d", default="GLBX.MDP3", help="Databento dataset")
 @click.option("--force", "-f", is_flag=True, help="Force redownload without prompting")
+@_handle_download_errors
 def download(
     symbol: str, schema: str, start: date, end: date, dataset: str, force: bool
 ) -> None:
@@ -213,149 +296,194 @@ def download(
         )
         console.print()
 
-    try:
-        cache_status = cache.check_cache(symbol, schema, start, end, dataset)
+    cache_status = cache.check_cache(symbol, schema, start, end, dataset)
 
-        if cache_status.status == CacheStatus.COMPLETE:
-            if force:
-                console.print(
-                    f"[yellow]Clearing cache and redownloading {symbol}...[/yellow]"
+    if cache_status.status == CacheStatus.COMPLETE:
+        if force:
+            console.print(
+                f"[yellow]Clearing cache and redownloading {symbol}...[/yellow]"
+            )
+            cache.clear_cache(symbol, schema, start, end, dataset)
+        else:
+            console.print(
+                Panel(
+                    f"All data for [cyan]{symbol}[/cyan] from {start} to {end} "
+                    f"is already cached.\n"
+                    f"Cached: [green]{cache_status.cached_partitions}[/green] "
+                    f"partitions",
+                    title="Data Already Cached",
+                    border_style="green",
+                    expand=False,
                 )
-                cache.clear_cache(symbol, schema, start, end, dataset)
-            else:
-                console.print(
-                    Panel(
-                        f"All data for [cyan]{symbol}[/cyan] from {start} to {end} "
-                        f"is already cached.\n"
-                        f"Cached: [green]{cache_status.cached_partitions}[/green] "
-                        f"partitions",
-                        title="Data Already Cached",
-                        border_style="green",
-                        expand=False,
-                    )
+            )
+            choice = Prompt.ask(
+                r"\[r]edownload or \[c]ancel?",
+                choices=["r", "c"],
+                default="c",
+            )
+            if choice == "c":
+                console.print("[dim]Cancelled.[/dim]")
+                return
+            console.print("[yellow]Clearing cache and redownloading...[/yellow]")
+            cache.clear_cache(symbol, schema, start, end, dataset)
+
+    elif cache_status.status == CacheStatus.PARTIAL:
+        if force:
+            console.print(
+                f"[yellow]Clearing cache and redownloading {symbol}...[/yellow]"
+            )
+            cache.clear_cache(symbol, schema, start, end, dataset)
+        else:
+            missing_str = format_date_ranges(cache_status.missing_ranges)
+            cached_str = format_date_ranges(cache_status.cached_ranges)
+            console.print(
+                Panel(
+                    f"Partial data exists for [cyan]{symbol}[/cyan] "
+                    f"from {start} to {end}.\n\n"
+                    f"[green]Cached:[/green] {cached_str} "
+                    f"({cache_status.cached_partitions} partitions)\n"
+                    f"[yellow]Missing:[/yellow] {missing_str} "
+                    f"({cache_status.missing_partitions} partitions)",
+                    title="Partial Cache",
+                    border_style="yellow",
+                    expand=False,
                 )
-                choice = Prompt.ask(
-                    r"\[r]edownload or \[c]ancel?",
-                    choices=["r", "c"],
-                    default="c",
-                )
-                if choice == "c":
-                    console.print("[dim]Cancelled.[/dim]")
-                    return
+            )
+            choice = Prompt.ask(
+                r"\[f]ill gaps, \[r]edownload all, or \[c]ancel?",
+                choices=["f", "r", "c"],
+                default="f",
+            )
+            if choice == "c":
+                console.print("[dim]Cancelled.[/dim]")
+                return
+            if choice == "r":
                 console.print("[yellow]Clearing cache and redownloading...[/yellow]")
                 cache.clear_cache(symbol, schema, start, end, dataset)
 
-        elif cache_status.status == CacheStatus.PARTIAL:
-            if force:
-                console.print(
-                    f"[yellow]Clearing cache and redownloading {symbol}...[/yellow]"
-                )
-                cache.clear_cache(symbol, schema, start, end, dataset)
-            else:
-                missing_str = format_date_ranges(cache_status.missing_ranges)
-                cached_str = format_date_ranges(cache_status.cached_ranges)
-                console.print(
-                    Panel(
-                        f"Partial data exists for [cyan]{symbol}[/cyan] "
-                        f"from {start} to {end}.\n\n"
-                        f"[green]Cached:[/green] {cached_str} "
-                        f"({cache_status.cached_partitions} partitions)\n"
-                        f"[yellow]Missing:[/yellow] {missing_str} "
-                        f"({cache_status.missing_partitions} partitions)",
-                        title="Partial Cache",
-                        border_style="yellow",
-                        expand=False,
-                    )
-                )
-                choice = Prompt.ask(
-                    r"\[f]ill gaps, \[r]edownload all, or \[c]ancel?",
-                    choices=["f", "r", "c"],
-                    default="f",
-                )
-                if choice == "c":
-                    console.print("[dim]Cancelled.[/dim]")
-                    return
-                if choice == "r":
-                    console.print(
-                        "[yellow]Clearing cache and redownloading...[/yellow]"
-                    )
-                    cache.clear_cache(symbol, schema, start, end, dataset)
+    _do_download(cache, symbol, schema, start, end, dataset)
 
-        _do_download(cache, symbol, schema, start, end, dataset)
 
-    except DownloadCancelledError as e:
+@main.command()
+@click.argument("symbol", required=False)
+@click.option("--schema", "-s", default=None, help="Schema to update (all if omitted)")
+@click.option("--all", "update_all", is_flag=True, help="Update all cached data")
+def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
+    """Update cached data from last cached date to yesterday (UTC).
+
+    Downloads new data since the last update. Requires existing cached data.
+    Dataset is inferred from the cached metadata. Historical data has a 24-hour
+    embargo, so yesterday UTC is used as the default end date.
+
+    \b
+    Examples:
+      dbn update ES.c.0              # Update all schemas for symbol
+      dbn update ES.c.0 -s ohlcv-1m  # Update specific schema
+      dbn update --all               # Update everything in cache
+    """
+    if not symbol and not update_all:
+        console.print("[red]Error:[/red] Either provide a SYMBOL or use --all flag")
+        sys.exit(1)
+
+    if symbol and update_all:
+        console.print("[red]Error:[/red] Cannot use both SYMBOL and --all flag")
+        sys.exit(1)
+
+    cache = DataCache()
+    all_cached = cache.list_cached()
+
+    if not all_cached:
         console.print(
             Panel(
-                f"Download cancelled.\n"
-                f"Completed: [green]{e.completed}[/green] / {e.total} partitions\n"
-                f"Partial data saved. Re-run to resume.",
-                title="Cancelled",
-                border_style="yellow",
-                expand=False,
-            )
-        )
-        sys.exit(130)
-
-    except EmptyDataError as e:
-        console.print(
-            Panel(
-                f"No data returned for [cyan]{e.symbol}[/cyan].\n\n"
-                "This usually means the symbol doesn't exist in the dataset.\n"
-                f"[dim]Dataset: {e.dataset}[/dim]",
-                title="Empty Data",
+                "No cached data found.\n\n"
+                "Use [cyan]dbn download[/cyan] to fetch data first.",
+                title="No Cached Data",
                 border_style="yellow",
                 expand=False,
             )
         )
         sys.exit(1)
 
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Cancelled[/yellow]")
-        sys.exit(130)
+    if update_all:
+        matches = all_cached
+    else:
+        symbol = _canonicalize_symbol(symbol)  # type: ignore[arg-type]
+        matches = filter_by_symbol_prefix(all_cached, symbol)
+        if schema:
+            matches = [m for m in matches if m.schema_ == schema]
 
-    except PermissionError as e:
-        console.print(
-            Panel(
-                f"[red]Permission denied:[/red] {e.filename}",
-                title="Error",
-                border_style="red",
-                expand=False,
+    if not matches:
+        if schema:
+            console.print(
+                Panel(
+                    f"No cached data for [cyan]{symbol}[/cyan] with schema "
+                    f"[blue]{schema}[/blue].\n\n"
+                    "Use [cyan]dbn download[/cyan] to fetch initial data.",
+                    title="No Cached Data",
+                    border_style="yellow",
+                    expand=False,
+                )
             )
-        )
+        else:
+            console.print(
+                Panel(
+                    f"No cached data for [cyan]{symbol}[/cyan].\n\n"
+                    "Use [cyan]dbn download[/cyan] to fetch initial data.",
+                    title="No Cached Data",
+                    border_style="yellow",
+                    expand=False,
+                )
+            )
         sys.exit(1)
 
-    except OSError as e:
-        console.print(
-            Panel(
-                f"[red]Storage error:[/red] {e}",
-                title="Error",
-                border_style="red",
-                expand=False,
-            )
-        )
-        sys.exit(1)
+    end = utc_today() - timedelta(days=1)
+    updated_count = 0
+    up_to_date_count = 0
+    error_count = 0
+    errors: list[tuple[str, str, str]] = []
+    warned_symbols: set[str] = set()
 
-    except MissingAPIKeyError:
-        console.print(
-            Panel(
-                "Missing API key. Set the [cyan]DATABENTO_API_KEY[/cyan] "
-                "environment variable.",
-                title="Configuration Error",
-                border_style="red",
-                expand=False,
+    for item in matches:
+        if has_lookahead_bias(item.symbol) and item.symbol not in warned_symbols:
+            warned_symbols.add(item.symbol)
+            console.print(
+                f"[yellow]⚠ {item.symbol} has look-ahead bias "
+                f"(volume/OI-based rolls)[/yellow]"
             )
-        )
-        sys.exit(1)
 
-    except Exception as e:
+        last_cached = item.ranges[-1].end
+        start = last_cached + timedelta(days=1)
+
+        if start >= end:
+            up_to_date_count += 1
+            continue
+
         console.print(
-            Panel(
-                f"[red]{type(e).__name__}:[/red] {e}",
-                title="Error",
-                border_style="red",
-                expand=False,
-            )
+            f"Updating [cyan]{item.symbol}[/cyan]/[blue]{item.schema_}[/blue] "
+            f"from {start} to {end}"
         )
+
+        try:
+            _do_download(cache, item.symbol, item.schema_, start, end, item.dataset)
+            updated_count += 1
+        except DownloadCancelledError:
+            raise
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            error_count += 1
+            errors.append((item.symbol, item.schema_, str(e)))
+            console.print("  [red]✗ Failed[/red]")
+
+    console.print()
+    if updated_count > 0:
+        console.print(f"[green]✓ Updated {updated_count} item(s)[/green]")
+    if up_to_date_count > 0:
+        console.print(f"[green]✓ {up_to_date_count} item(s) already up to date[/green]")
+    if error_count > 0:
+        console.print(f"[red]✗ {error_count} item(s) failed:[/red]")
+        for sym, sch, err in errors:
+            console.print(f"  [red]• {sym}/{sch}: {err}[/red]")
         sys.exit(1)
 
 

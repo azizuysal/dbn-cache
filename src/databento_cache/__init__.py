@@ -19,6 +19,7 @@ from .models import (
     DownloadProgress,
     DownloadStatus,
     PartitionInfo,
+    UpdateAllResult,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "MissingAPIKeyError",
     "PartialCacheError",
     "PartitionInfo",
+    "UpdateAllResult",
 ]
