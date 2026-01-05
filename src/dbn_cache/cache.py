@@ -241,10 +241,11 @@ class DataCache:
         meta_start = meta.ranges[0].start
         meta_end = meta.ranges[-1].end
 
-        if meta_start == all_min and meta_end == all_max:
+        # Fix if dates don't match OR if ranges are fragmented (more than 1 range)
+        if meta_start == all_min and meta_end == all_max and len(meta.ranges) == 1:
             return None  # Metadata is correct
 
-        # Fix metadata with actual dates
+        # Consolidate to single range with actual dates
         return SymbolMeta(
             dataset=meta.dataset,
             symbol=meta.symbol,
@@ -263,6 +264,50 @@ class DataCache:
         meta_path.parent.mkdir(parents=True, exist_ok=True)
         with meta_path.open("w") as f:
             json.dump(meta.model_dump(by_alias=True), f, indent=2, default=str)
+
+    def _rebuild_meta_from_files(
+        self, dataset: str, symbol: str, schema: str
+    ) -> SymbolMeta | None:
+        """Rebuild metadata from existing parquet files.
+
+        Used when meta.json is missing but parquet files exist.
+
+        Returns:
+            New SymbolMeta if files found, None if no files.
+        """
+        base_path = self._get_symbol_path(dataset, symbol, schema)
+        parquet_files = list(base_path.glob("**/*.parquet"))
+
+        if not parquet_files:
+            return None
+
+        # Get actual date range from all parquet files
+        all_min: date | None = None
+        all_max: date | None = None
+
+        for pf in parquet_files:
+            actual_range = _get_actual_date_range(pf)
+            if actual_range:
+                file_min, file_max = actual_range
+                if all_min is None or file_min < all_min:
+                    all_min = file_min
+                if all_max is None or file_max > all_max:
+                    all_max = file_max
+
+        if all_min is None or all_max is None:
+            return None
+
+        # Denormalize symbol (ES_c_0 -> ES.c.0)
+        original_symbol = symbol.replace("_", ".")
+
+        return SymbolMeta(
+            dataset=dataset,
+            symbol=original_symbol,
+            stype=detect_stype(original_symbol),
+            schema=schema,
+            ranges=[DateRange(start=all_min, end=all_max)],
+            updated_at=datetime.now(),
+        )
 
     def _merge_ranges(self, ranges: list[DateRange]) -> list[DateRange]:
         """Merge overlapping or adjacent date ranges."""
@@ -503,6 +548,7 @@ class DataCache:
         base_path: Path,
         request_start: date,
         request_end: date,
+        cached_ranges: list[DateRange],
     ) -> tuple[int, list[tuple[PartitionInfo, Path, date, date]]]:
         """Count partitions that need downloading and build download list.
 
@@ -512,6 +558,7 @@ class DataCache:
             base_path: Base path for partition files
             request_start: Original request start date
             request_end: Original request end date
+            cached_ranges: Existing cached date ranges
 
         Returns:
             Tuple of (total count, list of partition download info).
@@ -535,9 +582,17 @@ class DataCache:
 
                     dest = get_partition_path(base_path, schema, year, month)
                     m_start, m_end = month_start_end(year, month)
-                    # Use full request range for this month, not just the gap
+                    # Start with request range clamped to month
                     dl_start = max(m_start, request_start)
                     dl_end = min(m_end, request_end)
+
+                    # For OHLCV (monthly partitions), expand to include any existing
+                    # cached data for this month to avoid overwriting when updating
+                    for cached in cached_ranges:
+                        if cached.end >= m_start and cached.start <= m_end:
+                            dl_start = min(dl_start, max(m_start, cached.start))
+                            dl_end = max(dl_end, min(m_end, cached.end))
+
                     info = PartitionInfo(year=year, month=month)
                     # Always include - if there's a gap in this month, we need to
                     # re-download the partition even if the file exists
@@ -615,7 +670,7 @@ class DataCache:
                 return CachedData(files, start=start, end=end)
 
             total, partitions = self._count_partitions_to_download(
-                schema, missing, base_path, start, end
+                schema, missing, base_path, start, end, cached_ranges
             )
 
             if total == 0:
@@ -664,18 +719,10 @@ class DataCache:
                             tmp_path.unlink(missing_ok=True)
                             raise
 
-                        # Use actual date range from data, not requested dates
-                        actual_range = _get_actual_date_range(dest)
-                        if actual_range:
-                            actual_start, actual_end = actual_range
-                            completed_ranges.append(
-                                DateRange(start=actual_start, end=actual_end)
-                            )
-                        else:
-                            # Fallback to requested dates if file is empty
-                            completed_ranges.append(
-                                DateRange(start=dl_start, end=dl_end)
-                            )
+                        # Use partition dates (calendar-based) for metadata
+                        # This ensures contiguous months merge correctly
+                        # (e.g., June 30 + 1 = July 1)
+                        completed_ranges.append(DateRange(start=dl_start, end=dl_end))
                         self._save_incremental_meta(
                             dataset, symbol, schema, completed_ranges
                         )
@@ -972,6 +1019,58 @@ class DataCache:
             ranges=meta.ranges,
             size_bytes=size,
         )
+
+    def repair_metadata(self, dataset: str | None = None) -> list[tuple[str, str, str]]:
+        """Find and rebuild metadata for orphaned parquet files.
+
+        Scans for directories with parquet files but no meta.json,
+        and rebuilds metadata from the files.
+
+        Args:
+            dataset: Filter by dataset. If None, scan all.
+
+        Returns:
+            List of (dataset, symbol, schema) tuples that were repaired.
+        """
+        repaired: list[tuple[str, str, str]] = []
+
+        if dataset:
+            datasets = [dataset]
+        else:
+            if not self._cache_dir.exists():
+                return []
+            datasets = [d.name for d in self._cache_dir.iterdir() if d.is_dir()]
+
+        for ds in datasets:
+            ds_path = self._cache_dir / ds
+            if not ds_path.exists():
+                continue
+            for symbol_dir in ds_path.iterdir():
+                if not symbol_dir.is_dir():
+                    continue
+                for schema_dir in symbol_dir.iterdir():
+                    if not schema_dir.is_dir():
+                        continue
+
+                    meta_path = schema_dir / "meta.json"
+                    has_parquet = any(schema_dir.rglob("*.parquet"))
+
+                    if has_parquet and not meta_path.exists():
+                        # Orphaned files - rebuild metadata
+                        rebuilt = self._rebuild_meta_from_files(
+                            ds, symbol_dir.name, schema_dir.name
+                        )
+                        if rebuilt:
+                            self._save_meta(rebuilt)
+                            repaired.append((ds, rebuilt.symbol, schema_dir.name))
+                            logger.info(
+                                "Rebuilt metadata for %s/%s/%s",
+                                ds,
+                                rebuilt.symbol,
+                                schema_dir.name,
+                            )
+
+        return repaired
 
     def _add_quality_issues_unlocked(
         self,

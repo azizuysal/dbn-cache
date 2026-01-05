@@ -585,12 +585,23 @@ def cost(symbol: str, schema: str, start: date, end: date, dataset: str) -> None
 @click.option("--symbol", "-y", default=None, help="Filter by symbol (prefix match)")
 @click.option("--schema", "-s", default=None, help="Filter by schema")
 @click.option("--dataset", "-d", default=None, help="Filter by dataset")
-@click.option("--fix", is_flag=True, help="Remove stale metadata for missing files")
+@click.option(
+    "--fix",
+    is_flag=True,
+    help="Rebuild missing metadata and remove stale entries",
+)
 def verify(
     symbol: str | None, schema: str | None, dataset: str | None, fix: bool
 ) -> None:
     """Verify cache integrity (check for missing files)."""
     cache = DataCache()
+
+    # First, repair orphaned parquet files (files without metadata)
+    if fix:
+        repaired = cache.repair_metadata(dataset)
+        for ds, sym, sch in repaired:
+            console.print(f"[green]✓[/green] Rebuilt metadata for {sym}/{sch} ({ds})")
+
     all_cached = cache.list_cached(dataset)
 
     if symbol:

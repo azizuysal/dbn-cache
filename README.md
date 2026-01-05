@@ -77,7 +77,7 @@ dbn cost ES.c.0 --schema trades --start 2024-01-01 --end 2024-12-01
 
 # Verify cache integrity (check for missing files)
 dbn verify
-dbn verify --fix  # Remove stale metadata for missing files
+dbn verify --fix  # Rebuild missing metadata and remove stale entries
 
 # Reference commands
 dbn datasets  # List available datasets
@@ -149,6 +149,11 @@ except CacheMissError:
 issues = cache.get_quality_issues("ES.c.0", "ohlcv-1m")
 for issue in issues:
     print(f"{issue.date}: {issue.issue_type}")
+
+# Repair orphaned parquet files (missing metadata)
+repaired = cache.repair_metadata()
+for dataset, symbol, schema in repaired:
+    print(f"Rebuilt metadata for {symbol}/{schema}")
 
 # Custom cache location
 from pathlib import Path
