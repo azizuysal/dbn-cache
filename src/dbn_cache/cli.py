@@ -697,28 +697,36 @@ def schemas() -> None:
 
 @main.command()
 def symbols() -> None:
-    """Show symbol format examples for futures."""
-    console.print("[bold]Continuous Futures[/bold] (auto-rolling)")
+    """Show symbol format examples."""
+    console.print("[bold]Equities[/bold] [dim](-d XNAS.ITCH or DBEQ.BASIC)[/dim]")
+    console.print("  [cyan]AAPL[/cyan]     Apple Inc.")
+    console.print("  [cyan]MSFT[/cyan]     Microsoft Corp.")
+    console.print("  [cyan]SPY[/cyan]      SPDR S&P 500 ETF")
+    console.print()
+    console.print("[bold]Options[/bold] [dim](-d OPRA.PILLAR)[/dim]")
+    console.print("  [cyan]SPX.OPT[/cyan]  All SPX index options")
+    console.print("  [cyan]AAPL.OPT[/cyan] All Apple options")
+    console.print("  [cyan]SPXW.OPT[/cyan] SPX weekly options")
+    console.print()
+    console.print("[bold]Futures - Continuous[/bold] [dim](-d GLBX.MDP3)[/dim]")
     console.print("  [cyan]ES.c.0[/cyan]   Front-month E-mini S&P 500 (calendar roll)")
     console.print("  [cyan]ES.c.1[/cyan]   Second-month continuous")
-    console.print("  [cyan]ES.c.2[/cyan]   Third-month continuous")
     console.print(
         "  [yellow]ES.v.0[/yellow]   Volume-based roll [dim](has look-ahead bias)[/dim]"
     )
     console.print(
-        "  [yellow]ES.n.0[/yellow]   Open interest roll"
-        " [dim](has look-ahead bias)[/dim]"
+        "  [yellow]ES.n.0[/yellow]   Open interest roll "
+        "[dim](has look-ahead bias)[/dim]"
     )
     console.print()
-    console.print("[bold]Parent Symbols[/bold] (all contracts)")
-    console.print("  [cyan]ES.FUT[/cyan]  All E-mini S&P 500 futures")
-    console.print("  [cyan]NQ.FUT[/cyan]  All E-mini NASDAQ-100 futures")
-    console.print("  [cyan]CL.FUT[/cyan]  All Crude Oil futures")
+    console.print("[bold]Futures - Parent[/bold] [dim](all contracts)[/dim]")
+    console.print("  [cyan]ES.FUT[/cyan]   All E-mini S&P 500 futures")
+    console.print("  [cyan]NQ.FUT[/cyan]   All E-mini NASDAQ-100 futures")
+    console.print("  [cyan]CL.FUT[/cyan]   All Crude Oil futures")
     console.print()
-    console.print("[bold]Specific Contracts[/bold]")
-    console.print("  [cyan]ESZ24[/cyan]   E-mini S&P 500 Dec 2024")
-    console.print("  [cyan]ESH25[/cyan]   E-mini S&P 500 Mar 2025")
-    console.print("  [cyan]NQM25[/cyan]   E-mini NASDAQ-100 Jun 2025")
+    console.print("[bold]Futures - Specific[/bold]")
+    console.print("  [cyan]ESZ24[/cyan]    E-mini S&P 500 Dec 2024")
+    console.print("  [cyan]NQH25[/cyan]    E-mini NASDAQ-100 Mar 2025")
     console.print()
     console.print("[bold]Month Codes[/bold]")
     console.print(

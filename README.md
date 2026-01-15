@@ -215,6 +215,19 @@ When using continuous futures for backtesting:
 
 For accurate backtesting, use calendar-based continuous contracts (`.c.`) or download individual contracts and implement your own roll logic.
 
+## Market Calendar Integration
+
+Downloads automatically skip market holidays and non-trading days using exchange calendars:
+
+| Dataset | Calendar | Holiday Behavior |
+|---------|----------|------------------|
+| `GLBX.MDP3` | CME | Open most holidays with early close |
+| `OPRA.PILLAR` | NYSE | Closed on federal holidays |
+| `XNAS.ITCH` | NYSE | Closed on federal holidays |
+| `DBEQ.BASIC` | NYSE | Closed on federal holidays |
+
+This prevents API errors when downloading tick data on days when markets are closed.
+
 ## Development
 
 ```bash

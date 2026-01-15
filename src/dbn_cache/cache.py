@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import polars as pl
 from filelock import FileLock
 
+from .calendar import iter_trading_days
 from .client import DatabentoClient
 from .exceptions import CacheMissError, DownloadCancelledError, EmptyDataError
 from .models import (
@@ -376,11 +377,22 @@ class DataCache:
         schema: str,
         start: date,
         end: date,
+        dataset: str,
     ) -> int:
-        """Count total partitions in a date range."""
+        """Count total partitions in a date range.
+
+        For tick schemas, counts only trading days (skips holidays/weekends).
+        For OHLCV schemas, counts months.
+
+        Args:
+            schema: Data schema
+            start: Start date (inclusive)
+            end: End date (inclusive)
+            dataset: Databento dataset (required for calendar lookup)
+        """
         count = 0
         if is_tick_schema(schema):
-            for _ in iter_days(start, end):
+            for _ in iter_trading_days(start, end, dataset):
                 count += 1
         else:
             for _ in iter_months(start, end):
@@ -397,14 +409,14 @@ class DataCache:
     ) -> list[DateRange]:
         """Find partitions that are missing actual files on disk.
 
-        Returns date ranges for partitions where files don't exist,
-        regardless of what metadata says.
+        For tick schemas, only considers trading days (skips holidays/weekends).
+        Returns date ranges for partitions where files don't exist.
         """
         base_path = self._get_symbol_path(dataset, symbol, schema)
         missing: list[DateRange] = []
 
         if is_tick_schema(schema):
-            for d in iter_days(start, end):
+            for d in iter_trading_days(start, end, dataset):
                 path = get_partition_path(base_path, schema, d.year, d.month, d.day)
                 if not path.exists():
                     missing.append(DateRange(start=d, end=d))
@@ -454,7 +466,7 @@ class DataCache:
         else:
             missing_ranges = missing_from_meta
 
-        total_partitions = self._count_partitions_in_range(schema, start, end)
+        total_partitions = self._count_partitions_in_range(schema, start, end, dataset)
 
         if not missing_ranges:
             return CacheCheckResult(
@@ -466,7 +478,7 @@ class DataCache:
             )
 
         missing_partitions = sum(
-            self._count_partitions_in_range(schema, r.start, r.end)
+            self._count_partitions_in_range(schema, r.start, r.end, dataset)
             for r in missing_ranges
         )
         cached_partitions = total_partitions - missing_partitions
@@ -549,8 +561,11 @@ class DataCache:
         request_start: date,
         request_end: date,
         cached_ranges: list[DateRange],
+        dataset: str,
     ) -> tuple[int, list[tuple[PartitionInfo, Path, date, date]]]:
         """Count partitions that need downloading and build download list.
+
+        For tick schemas, only includes trading days (skips holidays/weekends).
 
         Args:
             schema: Data schema
@@ -559,6 +574,7 @@ class DataCache:
             request_start: Original request start date
             request_end: Original request end date
             cached_ranges: Existing cached date ranges
+            dataset: Databento dataset (required for calendar lookup)
 
         Returns:
             Tuple of (total count, list of partition download info).
@@ -567,7 +583,7 @@ class DataCache:
 
         for gap in missing:
             if is_tick_schema(schema):
-                for d in iter_days(gap.start, gap.end):
+                for d in iter_trading_days(gap.start, gap.end, dataset):
                     dest = get_partition_path(base_path, schema, d.year, d.month, d.day)
                     if not dest.exists():
                         info = PartitionInfo(year=d.year, month=d.month, day=d.day)
@@ -670,7 +686,7 @@ class DataCache:
                 return CachedData(files, start=start, end=end)
 
             total, partitions = self._count_partitions_to_download(
-                schema, missing, base_path, start, end, cached_ranges
+                schema, missing, base_path, start, end, cached_ranges, dataset
             )
 
             if total == 0:
