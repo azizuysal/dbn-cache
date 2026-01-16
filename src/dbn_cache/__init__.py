@@ -9,6 +9,15 @@ from .exceptions import (
     MissingAPIKeyError,
     PartialCacheError,
 )
+from .futures import (
+    generate_quarterly_contracts,
+    get_contract_dates,
+    get_expiration_date,
+    is_supported_contract,
+    is_supported_root,
+    parse_contract_symbol,
+    to_databento_symbol,
+)
 from .models import (
     CacheCheckResult,
     CachedData,
@@ -36,8 +45,15 @@ __all__ = [
     "DownloadProgress",
     "DownloadStatus",
     "EmptyDataError",
+    "generate_quarterly_contracts",
+    "get_contract_dates",
+    "get_expiration_date",
+    "is_supported_contract",
+    "is_supported_root",
     "MissingAPIKeyError",
+    "parse_contract_symbol",
     "PartialCacheError",
     "PartitionInfo",
+    "to_databento_symbol",
     "UpdateAllResult",
 ]

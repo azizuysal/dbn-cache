@@ -15,6 +15,13 @@ from filelock import FileLock
 from .calendar import iter_trading_days
 from .client import DatabentoClient
 from .exceptions import CacheMissError, DownloadCancelledError, EmptyDataError
+from .futures import (
+    get_contract_dates,
+    get_expiration_date,
+    is_supported_contract,
+    parse_contract_symbol,
+    to_databento_symbol,
+)
 from .models import (
     CacheCheckResult,
     CachedData,
@@ -169,6 +176,19 @@ class DataCache:
     def _get_lock_path(self, dataset: str, symbol: str, schema: str) -> Path:
         """Get path to lock file."""
         return self._get_symbol_path(dataset, symbol, schema) / ".lock"
+
+    def _cleanup_empty_dirs(self, start_path: Path, stop_at: Path) -> None:
+        """Remove empty directories walking up from start_path to stop_at."""
+        current = start_path
+        while current >= stop_at:
+            try:
+                if current.is_dir() and not any(current.iterdir()):
+                    current.rmdir()
+                else:
+                    break
+            except OSError:
+                break
+            current = current.parent
 
     @contextmanager
     def _lock(
@@ -638,29 +658,81 @@ class DataCache:
         self,
         symbol: str,
         schema: str,
-        start: date,
-        end: date,
+        start: date | None = None,
+        end: date | None = None,
         dataset: str = "GLBX.MDP3",
         on_progress: "Callable[[DownloadProgress], None] | None" = None,
         cancelled: "Callable[[], bool] | None" = None,
+        rollover_days: int = 14,
     ) -> CachedData:
         """Download data and cache it.
 
         Args:
             symbol: Symbol to download (e.g., 'ES.c.0', 'ESZ24')
             schema: Data schema (e.g., 'ohlcv-1m', 'trades')
-            start: Start date (inclusive)
-            end: End date (inclusive)
+            start: Start date (inclusive). If None, auto-detected for supported
+                futures contracts.
+            end: End date (inclusive). If None, auto-detected for supported
+                futures contracts.
             dataset: Databento dataset
             on_progress: Optional callback for progress updates
             cancelled: Optional callable that returns True if download should stop
+            rollover_days: Days before front-month to start (for auto-detected dates).
+                Default 14.
 
         Returns:
             CachedData wrapper for the downloaded files.
 
         Raises:
             DownloadCancelledError: If download was cancelled via the cancelled callback
+            ValueError: If dates are not provided and symbol is not a supported
+                futures contract for auto-detection.
+
+        Example:
+            >>> cache = DataCache()
+            >>> # Auto-detect dates for supported futures contracts
+            >>> data = cache.download("NQH25", "ohlcv-1m")
+            >>> # Custom rollover buffer
+            >>> data = cache.download("NQH25", "ohlcv-1m", rollover_days=7)
+            >>> # Explicit dates (always works)
+            >>> data = cache.download("NQH25", "ohlcv-1m",
+            ...                        start=date(2024, 12, 1),
+            ...                        end=date(2025, 3, 21))
         """
+        # Handle date auto-detection for supported futures contracts
+        if start is None or end is None:
+            if start is not None or end is not None:
+                msg = (
+                    "Both start and end must be provided together, "
+                    "or omit both for auto-detection."
+                )
+                raise ValueError(msg)
+
+            if is_supported_contract(symbol):
+                start, end = get_contract_dates(symbol, rollover_days=rollover_days)
+                # Cap end date at yesterday (Databento has 24h embargo)
+                yesterday = utc_today() - timedelta(days=1)
+                if end > yesterday:
+                    end = yesterday
+                # If contract hasn't started yet, raise error
+                if start > yesterday:
+                    msg = (
+                        f"Contract {symbol} data is not yet available. "
+                        f"Start date ({start}) is in the future."
+                    )
+                    raise ValueError(msg)
+            else:
+                msg = (
+                    f"start and end are required for {symbol}. "
+                    "Auto-detection only works for supported futures contracts "
+                    "(e.g., NQH25, ESZ24)."
+                )
+                raise ValueError(msg)
+
+        # Determine API symbol (Databento uses single-digit years for futures)
+        api_symbol = (
+            to_databento_symbol(symbol) if is_supported_contract(symbol) else symbol
+        )
         if has_lookahead_bias(symbol):
             logger.warning(
                 "Symbol %s uses volume/OI-based rolls which have look-ahead bias. "
@@ -727,8 +799,19 @@ class DataCache:
                             tmp_path = Path(tmp.name)
                         try:
                             self._download_partition(
-                                symbol, schema, dl_start, dl_end, dataset, tmp_path
+                                api_symbol, schema, dl_start, dl_end, dataset, tmp_path
                             )
+                            # Check if downloaded data has any rows before creating dirs
+                            row_count = (
+                                pl.scan_parquet(tmp_path)
+                                .select(pl.len())
+                                .collect()
+                                .item()
+                            )
+                            if row_count == 0:
+                                # No data for this partition, skip it
+                                tmp_path.unlink(missing_ok=True)
+                                continue
                             dest.parent.mkdir(parents=True, exist_ok=True)
                             shutil.move(tmp_path, dest)
                         except Exception:
@@ -771,11 +854,12 @@ class DataCache:
             pl.scan_parquet(f).select(pl.len()).collect().item() for f in files
         )
         if total_rows == 0:
-            # Clean up empty files and metadata
-            for f in files:
-                f.unlink(missing_ok=True)
-            meta_path = self._get_meta_path(dataset, symbol, schema)
-            meta_path.unlink(missing_ok=True)
+            # Clean up lock file and empty directories
+            lock_path = self._get_lock_path(dataset, symbol, schema)
+            lock_path.unlink(missing_ok=True)
+            symbol_path = self._get_symbol_path(dataset, symbol, schema)
+            dataset_path = self.cache_dir / dataset
+            self._cleanup_empty_dirs(symbol_path, dataset_path)
             raise EmptyDataError(symbol, dataset)
 
         return CachedData(files, start=start, end=end)
@@ -846,12 +930,16 @@ class DataCache:
     ) -> tuple[date, date] | None:
         """Get the date range needed to update cached data.
 
+        For specific futures contracts (e.g., NQH25), the end date is capped
+        at the contract's expiration date - no data exists after expiration.
+
         Args:
             cached_info: Cached data info from list_cached()
-            end: End date (defaults to yesterday UTC)
+            end: End date (defaults to yesterday UTC, or expiration for futures)
 
         Returns:
-            Tuple of (start, end) dates if update is needed, None if up to date.
+            Tuple of (start, end) dates if update is needed, None if up to date
+            or contract has expired.
         """
         if not cached_info.ranges:
             return None
@@ -859,6 +947,18 @@ class DataCache:
         last_cached = cached_info.ranges[-1].end
         start = last_cached + timedelta(days=1)
         end_date = end or (utc_today() - timedelta(days=1))
+
+        # For specific futures contracts, cap at expiration date
+        if is_supported_contract(cached_info.symbol):
+            try:
+                root, month, year = parse_contract_symbol(cached_info.symbol)
+                expiration = get_expiration_date(root, month, year)
+                if last_cached >= expiration:
+                    # Contract already expired and fully cached
+                    return None
+                end_date = min(end_date, expiration)
+            except ValueError:
+                pass  # Not a valid futures symbol, use default behavior
 
         if start > end_date:
             return None

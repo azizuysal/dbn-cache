@@ -1,12 +1,13 @@
 import signal
 import sys
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
 from functools import wraps
 from types import FrameType
 
 import click
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -19,12 +20,21 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from rich.prompt import Prompt
+from rich.table import Table
 from rich.text import Text
 
 from .cache import DataCache
 from .client import DatabentoClient
 from .exceptions import DownloadCancelledError, EmptyDataError, MissingAPIKeyError
+from .futures import (
+    generate_quarterly_contracts,
+    get_contract_dates,
+    is_supported_contract,
+    is_supported_root,
+    parse_contract_symbol,
+)
 from .models import (
+    CachedDataInfo,
     CacheStatus,
     DataQualityIssue,
     DownloadProgress,
@@ -35,6 +45,7 @@ from .utils import (
     format_date_ranges,
     has_lookahead_bias,
     parse_date,
+    utc_today,
 )
 
 console = Console()
@@ -270,97 +281,383 @@ def _display_data_quality_issues(issues: list[DataQualityIssue]) -> None:
 @main.command()
 @click.argument("symbol")
 @click.option("--schema", "-s", required=True, help="Data schema (e.g., ohlcv-1m)")
-@click.option("--start", required=True, type=parse_date, help="Start date (YYYY-MM-DD)")
-@click.option("--end", required=True, type=parse_date, help="End date (YYYY-MM-DD)")
+@click.option("--start", type=parse_date, default=None, help="Start date (YYYY-MM-DD)")
+@click.option("--end", type=parse_date, default=None, help="End date (YYYY-MM-DD)")
 @click.option("--dataset", "-d", default="GLBX.MDP3", help="Databento dataset")
 @click.option("--force", "-f", is_flag=True, help="Force redownload without prompting")
+@click.option(
+    "--rollover-days",
+    type=int,
+    default=14,
+    help="Days before front-month to start (for auto-detected dates)",
+)
+@click.option(
+    "--from",
+    "from_year",
+    type=int,
+    default=None,
+    help="Start year for batch download (e.g., 2016)",
+)
+@click.option(
+    "--to",
+    "to_year",
+    type=int,
+    default=None,
+    help="End year for batch download (default: current year)",
+)
 @_handle_download_errors
 def download(
-    symbol: str, schema: str, start: date, end: date, dataset: str, force: bool
+    symbol: str,
+    schema: str,
+    start: date | None,
+    end: date | None,
+    dataset: str,
+    force: bool,
+    rollover_days: int,
+    from_year: int | None,
+    to_year: int | None,
 ) -> None:
-    """Download and cache data for a symbol."""
+    """Download and cache data for a symbol.
+
+    \b
+    Single contract (dates auto-detected):
+      dbn download NQH25 -s ohlcv-1m
+      dbn download NQH25 -s ohlcv-1m --rollover-days 7
+
+    \b
+    Batch download (all quarterly contracts):
+      dbn download NQ -s ohlcv-1m --from 2016           # 2016 to now
+      dbn download NQ -s ohlcv-1m --from 2016 --to 2020 # 2016 to 2020
+
+    \b
+    Explicit dates (any symbol):
+      dbn download NQ.c.0 -s ohlcv-1m --start 2024-01-01 --end 2024-12-01
+
+    \b
+    Symbol formats:
+      NQH25   = Specific contract (Mar 2025)
+      NQ      = Root symbol (use with --from for batch)
+      NQ.c.0  = Continuous futures (requires --start/--end)
+    """
     symbol = _canonicalize_symbol(symbol)
+
+    # Batch mode: download all quarterly contracts for a root symbol
+    if from_year is not None:
+        # Validate batch mode options
+        if start is not None or end is not None:
+            console.print(
+                "[red]Error:[/red] --start/--end cannot be used with --from/--to.\n"
+                "[dim]Use --from/--to for batch download, or --start/--end for "
+                "explicit date range.[/dim]"
+            )
+            sys.exit(1)
+
+        if is_supported_contract(symbol):
+            console.print(
+                f"[red]Error:[/red] Cannot use --from with specific contract "
+                f"'{symbol}'.\n"
+                "[dim]Use just the root symbol (e.g., 'NQ' instead of 'NQH25').[/dim]"
+            )
+            sys.exit(1)
+
+        if not is_supported_root(symbol):
+            console.print(
+                f"[red]Error:[/red] '{symbol}' is not a supported futures root.\n"
+                "[dim]Supported roots: ES, NQ, RTY, YM, MES, MNQ, M2K, MYM, "
+                "ZB, ZN, ZF, ZT, UB, GC, SI, HG, PL, PA[/dim]"
+            )
+            sys.exit(1)
+
+        all_contracts = generate_quarterly_contracts(symbol, from_year, to_year)
+        yesterday = utc_today() - timedelta(days=1)
+
+        # Filter out contracts whose data is not yet available
+        contracts: list[str] = []
+        for contract in all_contracts:
+            start, _ = get_contract_dates(contract, rollover_days=rollover_days)
+            if start <= yesterday:
+                contracts.append(contract)
+
+        if not contracts:
+            console.print(
+                "[yellow]No contracts available yet for the specified range.[/yellow]"
+            )
+            return
+
+        _batch_download(symbol, schema, dataset, contracts, force, rollover_days)
+        return
+
+    # Single-symbol mode
     cache = DataCache()
 
+    # Look-ahead bias warning for volume/OI-based continuous futures
     if has_lookahead_bias(symbol):
         console.print(
             Panel(
-                f"[bold yellow]Warning:[/bold yellow] Symbol [cyan]{symbol}[/cyan] "
-                "uses volume/OI-based rolls which have look-ahead bias.\n"
-                "Use calendar rolls (.c.) for backtesting.",
+                f"Symbol [cyan]{symbol}[/cyan] uses volume or open-interest "
+                "based roll logic.\n\n"
+                "Roll dates are determined using data that wouldn't have been "
+                "available at the time.\n"
+                "For backtesting, consider using [cyan].c.0[/cyan] "
+                "(calendar-based rolls) instead.",
                 title="Look-Ahead Bias Warning",
                 border_style="yellow",
                 expand=False,
             )
         )
-        console.print()
 
+    # Auto-detect dates for supported futures contracts
+    if start is None and end is None:
+        if is_supported_contract(symbol):
+            start, expiration = get_contract_dates(symbol, rollover_days=rollover_days)
+            yesterday = utc_today() - timedelta(days=1)
+            if expiration > yesterday:
+                end = yesterday
+                console.print(
+                    f"[dim]Auto-detected: {start} to {end} (active contract, "
+                    f"capped at yesterday)[/dim]"
+                )
+            else:
+                end = expiration
+                console.print(f"[dim]Auto-detected: {start} to {end}[/dim]")
+        else:
+            console.print(
+                "[red]Error:[/red] --start and --end are required for this symbol.\n"
+                "[dim]Date auto-detection only works for supported futures contracts "
+                "(e.g., NQH25).[/dim]"
+            )
+            sys.exit(1)
+
+    # Validate dates are provided
+    if start is None or end is None:
+        console.print(
+            "[red]Error:[/red] Both --start and --end are required.\n"
+            "[dim]Use 'dbn download SYMBOL -s SCHEMA --start YYYY-MM-DD "
+            "--end YYYY-MM-DD'[/dim]"
+        )
+        sys.exit(1)
+
+    # Check cache status
     cache_status = cache.check_cache(symbol, schema, start, end, dataset)
 
     if cache_status.status == CacheStatus.COMPLETE:
         if force:
             console.print(
-                f"[yellow]Clearing cache and redownloading {symbol}...[/yellow]"
+                f"[yellow]Re-downloading {symbol} ({start} to {end})...[/yellow]"
             )
             cache.clear_cache(symbol, schema, start, end, dataset)
         else:
             console.print(
-                Panel(
-                    f"All data for [cyan]{symbol}[/cyan] from {start} to {end} "
-                    f"is already cached.\n"
-                    f"Cached: [green]{cache_status.cached_partitions}[/green] "
-                    f"partitions",
-                    title="Data Already Cached",
-                    border_style="green",
-                    expand=False,
-                )
+                f"[green]✓ Data already cached for {symbol}[/green] ({start} to {end})"
             )
-            choice = Prompt.ask(
-                r"\[r]edownload or \[c]ancel?",
-                choices=["r", "c"],
-                default="c",
+            answer = Prompt.ask(
+                "Re-download?",
+                choices=["y", "n"],
+                default="n",
             )
-            if choice == "c":
-                console.print("[dim]Cancelled.[/dim]")
+            if answer.lower() != "y":
                 return
-            console.print("[yellow]Clearing cache and redownloading...[/yellow]")
             cache.clear_cache(symbol, schema, start, end, dataset)
-
     elif cache_status.status == CacheStatus.PARTIAL:
+        console.print(
+            f"[yellow]Partial data found for {symbol}.[/yellow] "
+            "Downloading missing partitions..."
+        )
         if force:
-            console.print(
-                f"[yellow]Clearing cache and redownloading {symbol}...[/yellow]"
-            )
             cache.clear_cache(symbol, schema, start, end, dataset)
-        else:
-            missing_str = format_date_ranges(cache_status.missing_ranges)
-            cached_str = format_date_ranges(cache_status.cached_ranges)
-            console.print(
-                Panel(
-                    f"Partial data exists for [cyan]{symbol}[/cyan] "
-                    f"from {start} to {end}.\n\n"
-                    f"[green]Cached:[/green] {cached_str} "
-                    f"({cache_status.cached_partitions} partitions)\n"
-                    f"[yellow]Missing:[/yellow] {missing_str} "
-                    f"({cache_status.missing_partitions} partitions)",
-                    title="Partial Cache",
-                    border_style="yellow",
-                    expand=False,
-                )
-            )
-            choice = Prompt.ask(
-                r"\[f]ill gaps, \[r]edownload all, or \[c]ancel?",
-                choices=["f", "r", "c"],
-                default="f",
-            )
-            if choice == "c":
-                console.print("[dim]Cancelled.[/dim]")
-                return
-            if choice == "r":
-                console.print("[yellow]Clearing cache and redownloading...[/yellow]")
-                cache.clear_cache(symbol, schema, start, end, dataset)
 
     _do_download(cache, symbol, schema, start, end, dataset)
+
+
+def _batch_download(
+    root: str,
+    schema: str,
+    dataset: str,
+    contracts: list[str],
+    force: bool,
+    rollover_days: int,
+) -> None:
+    """Download multiple contracts with unified progress display."""
+    cache = DataCache()
+    total = len(contracts)
+
+    # Tracking state
+    success_count = 0
+    skip_count = 0
+    error_count = 0
+    quality_issues: dict[str, list[DataQualityIssue]] = {}
+    errors: list[tuple[str, str]] = []
+    cancelled = False
+
+    # Current download state
+    current_contract = ""
+    current_partition = ""
+    partition_current = 0
+    partition_total = 0
+    current_has_warnings = False
+
+    # Signal handling for Ctrl+C
+    cancel_requested = False
+    original_handler = signal.getsignal(signal.SIGINT)
+
+    def handle_sigint(signum: int, frame: FrameType | None) -> None:
+        nonlocal cancel_requested
+        cancel_requested = True
+
+    def build_display() -> Group:
+        """Build the live display content."""
+        lines: list[str] = []
+
+        # Header: "NQ ohlcv-1m: 15/45 contracts"
+        completed = success_count + skip_count + error_count
+        lines.append(
+            f"[bold]{root}[/bold] [blue]{schema}[/blue]: {completed}/{total} contracts"
+        )
+
+        # Current download progress (if downloading)
+        if current_contract and partition_total > 0:
+            # Build progress bar with color based on quality warnings
+            pct = partition_current / partition_total if partition_total else 0
+            filled = int(pct * 20)
+            bar_color = "yellow" if current_has_warnings else "green"
+            bar = "━" * filled + "╸" + "─" * (19 - filled) if filled < 20 else "━" * 20
+            lines.append(
+                f"  [cyan]▶[/cyan] {current_contract} [{current_partition}] "
+                f"[{bar_color}]{bar}[/{bar_color}] "
+                f"{partition_current}/{partition_total}"
+            )
+        elif current_contract:
+            lines.append(f"  [cyan]▶[/cyan] {current_contract}...")
+
+        # Running totals
+        parts: list[str] = []
+        if success_count:
+            parts.append(f"[green]✓ {success_count} downloaded[/green]")
+        if skip_count:
+            parts.append(f"[dim]○ {skip_count} skipped[/dim]")
+        if error_count:
+            parts.append(f"[red]✗ {error_count} errors[/red]")
+        if parts:
+            lines.append("  " + " | ".join(parts))
+
+        return Group(*[Text.from_markup(line) for line in lines])
+
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    try:
+        with Live(build_display(), console=console, refresh_per_second=10) as live:
+            for contract in contracts:
+                if cancel_requested:
+                    cancelled = True
+                    break
+
+                current_contract = contract
+                current_partition = ""
+                partition_current = 0
+                partition_total = 0
+                current_has_warnings = False
+                live.update(build_display())
+
+                try:
+                    # Get contract dates
+                    start, expiration = get_contract_dates(
+                        contract, rollover_days=rollover_days
+                    )
+                    yesterday = utc_today() - timedelta(days=1)
+                    end = min(expiration, yesterday)
+
+                    # Check cache status
+                    cache_status = cache.check_cache(
+                        contract, schema, start, end, dataset
+                    )
+
+                    if cache_status.status == CacheStatus.COMPLETE and not force:
+                        skip_count += 1
+                        live.update(build_display())
+                        continue
+                    elif force:
+                        cache.clear_cache(contract, schema, start, end, dataset)
+
+                    # Download with progress callback
+                    def on_progress(p: DownloadProgress) -> None:
+                        nonlocal current_partition, partition_current, partition_total
+                        nonlocal current_has_warnings
+                        partition_total = p.total
+                        partition_current = p.current
+                        current_partition = p.partition.label
+                        if p.quality_warnings > 0:
+                            current_has_warnings = True
+                        live.update(build_display())
+
+                    cache.download(
+                        contract,
+                        schema,
+                        start,
+                        end,
+                        dataset,
+                        on_progress=on_progress,
+                        cancelled=lambda: cancel_requested,
+                    )
+
+                    # Check for quality issues
+                    issues = cache.get_quality_issues(
+                        contract, schema, dataset, start, end
+                    )
+                    if issues:
+                        quality_issues[contract] = issues
+
+                    success_count += 1
+
+                except EmptyDataError:
+                    skip_count += 1
+                except DownloadCancelledError:
+                    cancelled = True
+                    break
+                except Exception as e:
+                    error_count += 1
+                    errors.append((contract, str(e)))
+
+                live.update(build_display())
+
+        # Final display is shown by Live context exit
+        current_contract = ""  # Clear current contract indicator
+
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+
+    # Print final summary
+    console.print()
+    if cancelled:
+        console.print(
+            f"[yellow]Cancelled.[/yellow] {success_count} downloaded, "
+            f"{skip_count} skipped."
+        )
+    else:
+        console.print(
+            f"[bold]Done.[/bold] {success_count} downloaded, "
+            f"{skip_count} skipped, {error_count} errors."
+        )
+
+    # Show errors
+    if errors:
+        console.print()
+        console.print("[red]Errors:[/red]")
+        for contract, err in errors:
+            console.print(f"  {contract}: {err}")
+
+    # Show quality issues
+    if quality_issues:
+        console.print()
+        total_issues = sum(len(v) for v in quality_issues.values())
+        console.print(f"[yellow]Data quality issues ({total_issues} total):[/yellow]")
+        for contract, issues in sorted(quality_issues.items()):
+            dates = ", ".join(str(i.date) for i in issues[:3])
+            if len(issues) > 3:
+                dates += f" (+{len(issues) - 3} more)"
+            console.print(f"  {contract}: {dates}")
+
+    if cancelled:
+        sys.exit(130)
 
 
 @main.command()
@@ -484,58 +781,258 @@ def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
         sys.exit(1)
 
 
-@main.command("list")
-@click.option("--dataset", "-d", default=None, help="Filter by dataset")
-def list_cached(dataset: str | None) -> None:
-    """List cached data."""
-    cache = DataCache()
-    items = cache.list_cached(dataset)
-    if not items:
-        click.echo("No cached data found.")
-        return
+def _format_size(size_bytes: int) -> str:
+    """Format size in human-readable units."""
+    if size_bytes >= 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+    elif size_bytes >= 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes} B"
+
+
+def _group_futures_contracts(
+    items: list[CachedDataInfo],
+) -> list[dict[str, str | int | list[CachedDataInfo]]]:
+    """Group futures contracts by root symbol and schema.
+
+    Returns a list of groups, where each group is either:
+    - A single non-contract item
+    - A group of contracts with the same root and schema
+    """
+    from collections import defaultdict
+
+    # Separate contracts from non-contracts
+    contract_groups: dict[tuple[str, str, str], list[CachedDataInfo]] = defaultdict(
+        list
+    )
+    non_contracts: list[CachedDataInfo] = []
 
     for item in items:
-        ranges_str = format_date_ranges(item.ranges)
-        size_mb = item.size_bytes / (1024 * 1024)
-        click.echo(f"{item.dataset}/{item.symbol}/{item.schema_}")
-        click.echo(f"  Ranges: {ranges_str}")
-        click.echo(f"  Size: {size_mb:.2f} MB")
-
-
-@main.command()
-@click.argument("symbol")
-@click.option("--schema", "-s", default=None, help="Data schema (optional)")
-@click.option("--dataset", "-d", default=None, help="Databento dataset (optional)")
-def info(symbol: str, schema: str | None, dataset: str | None) -> None:
-    """Show cache info for a symbol.
-
-    If no schema is specified, shows all cached schemas for the symbol.
-    Symbol matching is case-insensitive and supports prefix matching
-    (e.g., 'nq' matches 'NQ.c.0', 'NQU24', etc.).
-    """
-    display_symbol = _canonicalize_symbol(symbol)
-    cache = DataCache()
-    all_cached = cache.list_cached(dataset)
-
-    matches = filter_by_symbol_prefix(all_cached, symbol)
-
-    if schema:
-        matches = [item for item in matches if item.schema_ == schema]
-
-    if not matches:
-        if schema:
-            console.print(f"No cached data for {display_symbol}/{schema}")
+        if is_supported_contract(item.symbol):
+            try:
+                root, _, _ = parse_contract_symbol(item.symbol)
+                key = (root, item.schema_, item.dataset)
+                contract_groups[key].append(item)
+            except ValueError:
+                non_contracts.append(item)
         else:
-            console.print(f"No cached data for {display_symbol}")
+            non_contracts.append(item)
+
+    # Build result list
+    results: list[dict[str, str | int | list[CachedDataInfo]]] = []
+
+    # Add non-contracts as individual items
+    for item in non_contracts:
+        results.append({"type": "single", "items": [item]})
+
+    # Add contract groups
+    for (root, schema, dataset), group_items in sorted(contract_groups.items()):
+        # Sort by contract symbol
+        group_items.sort(key=lambda x: x.symbol)
+
+        # Check for gaps - generate expected contracts and compare
+        if len(group_items) >= 2:
+            first = group_items[0].symbol
+            last = group_items[-1].symbol
+            _, first_month, first_year = parse_contract_symbol(first)
+            _, last_month, last_year = parse_contract_symbol(last)
+
+            # Count expected quarterly contracts
+            expected_count = 0
+            for year in range(first_year, last_year + 1):
+                for month in (3, 6, 9, 12):
+                    if (year == first_year and month < first_month) or (
+                        year == last_year and month > last_month
+                    ):
+                        continue
+                    expected_count += 1
+
+            has_gaps = len(group_items) < expected_count
+        else:
+            has_gaps = False
+
+        results.append(
+            {
+                "type": "group",
+                "root": root,
+                "schema": schema,
+                "dataset": dataset,
+                "items": group_items,
+                "has_gaps": has_gaps,
+            }
+        )
+
+    # Sort results by symbol/root
+    def sort_key(r: dict[str, str | int | list[CachedDataInfo]]) -> str:
+        if r["type"] == "single":
+            items_list = r["items"]
+            if isinstance(items_list, list) and len(items_list) > 0:
+                return items_list[0].symbol
+            return ""
+        return str(r.get("root", ""))
+
+    results.sort(key=sort_key)
+    return results
+
+
+@main.command("list")
+@click.argument("symbol", required=False, default=None)
+@click.option("--schema", "-s", default=None, help="Filter by schema")
+@click.option("--dataset", "-d", default=None, help="Filter by dataset")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed output")
+def list_cached(
+    symbol: str | None,
+    schema: str | None,
+    dataset: str | None,
+    verbose: bool,
+) -> None:
+    """List cached data.
+
+    \b
+    Table view (default):
+      dbn list                    # List all cached data
+      dbn list NQ                 # Filter by symbol prefix
+      dbn list -s ohlcv-1m        # Filter by schema
+
+    \b
+    Detailed view:
+      dbn list -v                 # Verbose output for all
+      dbn list -v ES.c.0          # Verbose output for specific symbol
+    """
+    cache = DataCache()
+    items = cache.list_cached(dataset)
+
+    if not items:
+        console.print("[dim]No cached data found.[/dim]")
         return
 
-    for item in matches:
+    # Filter by symbol prefix if provided
+    if symbol:
+        symbol = _canonicalize_symbol(symbol)
+        items = filter_by_symbol_prefix(items, symbol)
+
+    # Filter by schema if provided
+    if schema:
+        items = [item for item in items if item.schema_ == schema]
+
+    if not items:
+        console.print("[dim]No cached data matches the filter.[/dim]")
+        return
+
+    total_size = sum(item.size_bytes for item in items)
+    total_items = len(items)
+
+    if verbose:
+        _list_verbose(cache, items, total_items, total_size)
+    else:
+        _list_table(cache, items, total_items, total_size)
+
+
+def _list_table(
+    cache: DataCache,
+    items: list[CachedDataInfo],
+    total_items: int,
+    total_size: int,
+) -> None:
+    """Display cached data in table format."""
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Symbol", style="cyan")
+    table.add_column("Schema", style="blue")
+    table.add_column("Date Range")
+    table.add_column("Size", justify="right")
+    table.add_column("Quality", justify="center")
+
+    groups = _group_futures_contracts(items)
+
+    for group in groups:
+        group_items = group["items"]
+        if not isinstance(group_items, list):
+            continue
+
+        if group["type"] == "single":
+            item = group_items[0]
+            ranges_str = format_date_ranges(item.ranges)
+            size_str = _format_size(item.size_bytes)
+
+            # Get quality issues
+            issues = cache.get_quality_issues(item.symbol, item.schema_, item.dataset)
+            if issues:
+                quality_str = f"[yellow]⚠ {len(issues)}[/yellow]"
+            else:
+                quality_str = "[green]✓[/green]"
+
+            table.add_row(item.symbol, item.schema_, ranges_str, size_str, quality_str)
+        else:
+            # Grouped contracts
+            root = str(group["root"])
+            schema_ = str(group["schema"])
+            has_gaps = group.get("has_gaps", False)
+            count = len(group_items)
+
+            # Symbol column: "NQ (45)" or "NQ (6, gaps)"
+            gaps_suffix = ", gaps" if has_gaps else ""
+            symbol_str = f"{root} ({count}{gaps_suffix})"
+
+            # Date range: "NQH16 → NQH26"
+            first_symbol = group_items[0].symbol
+            last_symbol = group_items[-1].symbol
+            range_str = f"{first_symbol} → {last_symbol}"
+
+            # Total size
+            group_size = sum(i.size_bytes for i in group_items)
+            size_str = _format_size(group_size)
+
+            # Quality issues across all contracts
+            total_issues = 0
+            for item in group_items:
+                issues = cache.get_quality_issues(
+                    item.symbol, item.schema_, item.dataset
+                )
+                total_issues += len(issues)
+
+            if total_issues > 0:
+                quality_str = f"[yellow]⚠ {total_issues}[/yellow]"
+            else:
+                quality_str = "[green]✓[/green]"
+
+            table.add_row(symbol_str, schema_, range_str, size_str, quality_str)
+
+    console.print(table)
+    console.print()
+    console.print(f"[dim]{total_items} items, {_format_size(total_size)} total[/dim]")
+    console.print("[dim]Use 'dbn list -v' for details.[/dim]")
+
+
+def _list_verbose(
+    cache: DataCache,
+    items: list[CachedDataInfo],
+    total_items: int,
+    total_size: int,
+) -> None:
+    """Display cached data in verbose format."""
+    for i, item in enumerate(items):
+        if i > 0:
+            console.print()
+
         ranges_str = format_date_ranges(item.ranges)
-        size_mb = item.size_bytes / (1024 * 1024)
+        size_str = _format_size(item.size_bytes)
+
         console.print(f"[cyan]{item.symbol}[/cyan] / [blue]{item.schema_}[/blue]")
         console.print(f"  Dataset: {item.dataset}")
         console.print(f"  Ranges:  {ranges_str}")
-        console.print(f"  Size:    {size_mb:.2f} MB")
+        console.print(f"  Size:    {size_str}")
+
+        # Show quality issues
+        issues = cache.get_quality_issues(item.symbol, item.schema_, item.dataset)
+        if issues:
+            console.print(f"  Quality: [yellow]⚠ {len(issues)} issues[/yellow]")
+            for issue in issues:
+                console.print(f"    [dim]{issue.date}: {issue.issue_type}[/dim]")
+
+    console.print()
+    console.print(f"[dim]{total_items} items, {_format_size(total_size)} total[/dim]")
 
 
 @main.command()
@@ -727,6 +1224,10 @@ def symbols() -> None:
     console.print("[bold]Futures - Specific[/bold]")
     console.print("  [cyan]ESZ24[/cyan]    E-mini S&P 500 Dec 2024")
     console.print("  [cyan]NQH25[/cyan]    E-mini NASDAQ-100 Mar 2025")
+    console.print("  [cyan]NQH16[/cyan]    E-mini NASDAQ-100 Mar 2016 (historical)")
+    console.print()
+    console.print("[bold]Year Format[/bold]")
+    console.print("  Use 2-digit years: 25 → 2025, 16 → 2016")
     console.print()
     console.print("[bold]Month Codes[/bold]")
     console.print(

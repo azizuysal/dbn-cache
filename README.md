@@ -52,7 +52,14 @@ dbn download -h
 # Download E-mini S&P 500 continuous futures (1-minute OHLCV)
 dbn download ES.c.0 --schema ohlcv-1m --start 2024-01-01 --end 2024-12-01
 
-# Download specific contract
+# Download specific contract (dates auto-detected for supported futures)
+dbn download NQH25 --schema ohlcv-1m
+
+# Batch download all quarterly contracts for a root symbol
+dbn download NQ --schema ohlcv-1m --from 2016              # 2016 to present
+dbn download NQ --schema ohlcv-1m --from 2016 --to 2020    # 2016 to 2020
+
+# Override auto-detection with explicit dates
 dbn download ESZ24 --schema trades --start 2024-11-01 --end 2024-12-01
 
 # Download from different dataset (default: GLBX.MDP3)
@@ -63,14 +70,12 @@ dbn update ES.c.0                # Update all schemas for symbol
 dbn update ES.c.0 -s ohlcv-1m    # Update specific schema
 dbn update --all                  # Update everything in cache
 
-# List cached data
-dbn list
-
-# Show info for specific symbol
-dbn info ES.c.0 --schema ohlcv-1m
-
-# Show data quality issues
-dbn quality ES.c.0 --schema ohlcv-1m
+# List cached data (table view with quality indicators)
+dbn list                    # All cached data
+dbn list NQ                 # Filter by symbol prefix
+dbn list -s ohlcv-1m        # Filter by schema
+dbn list -v                 # Verbose output with quality details
+dbn list -v ES.c.0          # Verbose for specific symbol
 
 # Estimate cost before downloading
 dbn cost ES.c.0 --schema trades --start 2024-01-01 --end 2024-12-01
@@ -84,6 +89,58 @@ dbn datasets  # List available datasets
 dbn schemas   # List available schemas
 dbn symbols   # Show symbol format examples
 ```
+
+### Auto-Detection for Futures Contracts
+
+For supported futures contracts, dates are automatically calculated based on contract specifications:
+
+```bash
+# No --start/--end needed - dates auto-detected
+dbn download NQH25 --schema ohlcv-1m
+# → Downloads: Dec 6, 2024 to Mar 21, 2025
+
+# Adjust rollover buffer (default 14 days before front-month)
+dbn download NQH25 --schema ohlcv-1m --rollover-days 7
+
+# Explicit dates still work and override auto-detection
+dbn download NQH25 --schema ohlcv-1m --start 2024-12-01 --end 2025-03-21
+```
+
+### Batch Download
+
+Download all quarterly contracts for a root symbol over a year range:
+
+```bash
+# Download NQ contracts from 2016 to present
+dbn download NQ --schema ohlcv-1m --from 2016
+
+# Download NQ contracts from 2016 to 2020
+dbn download NQ --schema ohlcv-1m --from 2016 --to 2020
+# → Downloads: NQH16, NQM16, NQU16, NQZ16, NQH17, ..., NQZ20 (20 contracts)
+```
+
+This downloads all quarterly contracts (March, June, September, December) for the specified years. Each contract's dates are auto-detected. Already-cached contracts are skipped.
+
+**Symbol format:** `ROOT` + `MONTH_CODE` + `2-DIGIT_YEAR`
+
+| Input | Interpreted As |
+|-------|---------------|
+| `NQH25` | March 2025 |
+| `NQH16` | March 2016 |
+| `ESZ24` | December 2024 |
+
+Always use 2-digit years (e.g., `NQH25`, not `NQH5`).
+
+**Supported products:**
+- **Equity index:** ES, NQ, RTY, YM, EMD, MES, MNQ, M2K, MYM, NKD, NIY
+- **Treasuries:** ZB, ZN, ZF, ZT, UB
+- **Metals:** GC, SI, HG, PL, PA
+
+**Date calculation:**
+- **End:** Contract expiration date
+- **Start:** Previous quarterly contract expiration minus rollover buffer
+
+For other symbols (stocks, continuous futures, unsupported products), `--start` and `--end` remain required.
 
 ### Shell Completions
 
@@ -110,13 +167,28 @@ dbn completions powershell >> $PROFILE
 
 ```python
 from datetime import date
-from dbn_cache import DataCache
+from dbn_cache import DataCache, get_contract_dates
 
 # Initialize cache (uses ~/.databento by default)
 cache = DataCache()
 
 # Download and cache data
 data = cache.download("ES.c.0", "ohlcv-1m", date(2024, 1, 1), date(2024, 12, 1))
+
+# Auto-detect dates for supported futures contracts
+data = cache.download("NQH25", "ohlcv-1m")  # Dates calculated automatically
+data = cache.download("NQH25", "ohlcv-1m", rollover_days=7)  # Custom buffer
+
+# Get contract dates directly
+start, end = get_contract_dates("NQH25", rollover_days=14)
+# → (date(2024, 12, 6), date(2025, 3, 21))
+
+# Generate all quarterly contracts for batch download
+from dbn_cache import generate_quarterly_contracts
+contracts = generate_quarterly_contracts("NQ", 2016, 2020)
+# → ['NQH16', 'NQM16', 'NQU16', 'NQZ16', 'NQH17', ..., 'NQZ20']
+for symbol in contracts:
+    cache.download(symbol, "ohlcv-1m")
 
 # Get as Polars LazyFrame
 df = data.to_polars().collect()

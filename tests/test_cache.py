@@ -183,6 +183,99 @@ class TestDataCacheUpdate:
         result = cache.update("ES.c.0", "ohlcv-1m")
         assert result is None
 
+    def test_update_expired_futures_contract(self, tmp_path: Path) -> None:
+        """Expired futures contracts should not be updated past expiration."""
+        cache = DataCache(cache_dir=tmp_path)
+
+        # NQH24 expired on 2024-03-15 (3rd Friday of March 2024)
+        base_path = tmp_path / "GLBX.MDP3" / "NQH24" / "ohlcv-1d"
+        base_path.mkdir(parents=True)
+        (base_path / "2024").mkdir()
+        df = pl.DataFrame({"ts": [1, 2, 3]})
+        df.write_parquet(base_path / "2024" / "03.parquet")
+
+        meta_path = base_path / "meta.json"
+        meta = SymbolMeta(
+            dataset="GLBX.MDP3",
+            symbol="NQH24",
+            stype="raw_symbol",
+            schema="ohlcv-1d",
+            # Cached through expiration
+            ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 3, 15))],
+            updated_at=datetime.now(),
+        )
+        import json
+
+        with meta_path.open("w") as f:
+            json.dump(meta.model_dump(by_alias=True), f, default=str)
+
+        # Should return None since contract is expired and fully cached
+        result = cache.update("NQH24", "ohlcv-1d")
+        assert result is None
+
+
+class TestGetUpdateRangeExpiredContracts:
+    """Test get_update_range respects futures contract expiration."""
+
+    def test_expired_contract_returns_none(self, tmp_path: Path) -> None:
+        """Fully cached expired contracts should not need updates."""
+        from dbn_cache.models import CachedDataInfo
+
+        cache = DataCache(cache_dir=tmp_path)
+
+        # NQH24 expired on 2024-03-15
+        cached_info = CachedDataInfo(
+            dataset="GLBX.MDP3",
+            symbol="NQH24",
+            schema="ohlcv-1d",
+            ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 3, 15))],
+            size_bytes=1000,
+        )
+
+        update_range = cache.get_update_range(cached_info)
+        assert update_range is None
+
+    def test_partial_contract_caps_at_expiration(self, tmp_path: Path) -> None:
+        """Contracts cached before expiration should cap update at expiration."""
+        from dbn_cache.models import CachedDataInfo
+
+        cache = DataCache(cache_dir=tmp_path)
+
+        # NQH24 expired on 2024-03-15, but only cached through March 10
+        cached_info = CachedDataInfo(
+            dataset="GLBX.MDP3",
+            symbol="NQH24",
+            schema="ohlcv-1d",
+            ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 3, 10))],
+            size_bytes=1000,
+        )
+
+        update_range = cache.get_update_range(cached_info)
+        assert update_range is not None
+        start, end = update_range
+        assert start == date(2024, 3, 11)
+        assert end == date(2024, 3, 15)  # Capped at expiration
+
+    def test_continuous_futures_not_capped(self, tmp_path: Path) -> None:
+        """Continuous futures contracts should not have expiration caps."""
+        from dbn_cache.models import CachedDataInfo
+
+        cache = DataCache(cache_dir=tmp_path)
+
+        cached_info = CachedDataInfo(
+            dataset="GLBX.MDP3",
+            symbol="ES.c.0",
+            schema="ohlcv-1d",
+            ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 3, 10))],
+            size_bytes=1000,
+        )
+
+        update_range = cache.get_update_range(cached_info)
+        assert update_range is not None
+        _start, end = update_range
+        # End should be yesterday, not capped at any expiration
+        assert end > date(2024, 3, 15)
+
 
 class TestDataCacheUpdateAll:
     def test_update_all_empty_cache(self, tmp_path: Path) -> None:

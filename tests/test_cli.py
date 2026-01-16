@@ -199,6 +199,52 @@ class TestCliDownload:
             assert "DATABENTO_API_KEY" in result.output
 
 
+class TestCliBatchDownload:
+    def test_batch_from_with_start_end_error(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "download",
+                "NQ",
+                "-s",
+                "ohlcv-1m",
+                "--from",
+                "2020",
+                "--start",
+                "2020-01-01",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "--start/--end cannot be used with --from/--to" in result.output
+
+    def test_batch_from_with_specific_contract_error(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["download", "NQH25", "-s", "ohlcv-1m", "--from", "2020"],
+        )
+        assert result.exit_code == 1
+        assert "Cannot use --from with specific contract" in result.output
+
+    def test_batch_from_with_unsupported_root_error(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["download", "VX", "-s", "ohlcv-1m", "--from", "2020"],
+        )
+        assert result.exit_code == 1
+        assert "not a supported futures root" in result.output
+
+    def test_batch_download_help(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(main, ["download", "-h"])
+        assert result.exit_code == 0
+        assert "--from" in result.output
+        assert "--to" in result.output
+        assert "Batch download" in result.output
+
+
 class TestCliList:
     def test_list_empty(self) -> None:
         runner = CliRunner()
@@ -209,18 +255,6 @@ class TestCliList:
             result = runner.invoke(main, ["list"])
             assert result.exit_code == 0
             assert "No cached data found" in result.output
-
-
-class TestCliInfo:
-    def test_info_not_cached(self) -> None:
-        runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
-            mock_cache = mock_cache_cls.return_value
-            mock_cache.info.return_value = None
-
-            result = runner.invoke(main, ["info", "ES.c.0", "-s", "ohlcv-1m"])
-            assert result.exit_code == 0
-            assert "No cached data" in result.output
 
 
 class TestCliCost:
