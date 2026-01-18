@@ -792,6 +792,32 @@ def _format_size(size_bytes: int) -> str:
     return f"{size_bytes} B"
 
 
+# Schema order: coarsest to finest granularity
+_SCHEMA_ORDER = {"ohlcv-1d": 0, "ohlcv-1h": 1, "ohlcv-1m": 2, "ohlcv-1s": 3}
+
+
+def _item_sort_key(item: CachedDataInfo) -> tuple[str, int, int, int, int, str]:
+    """Sort key for cached data items.
+
+    Order: root symbol, then continuous contracts before individual contracts,
+    then chronologically by year/month, then schema (1d → 1h → 1m → 1s).
+    """
+    schema_idx = _SCHEMA_ORDER.get(item.schema_, 99)
+    # Individual contracts (NQH25, ESZ24, etc.)
+    if is_supported_contract(item.symbol):
+        try:
+            root, month, year = parse_contract_symbol(item.symbol)
+            return (root, 1, year, month, schema_idx, item.schema_)
+        except ValueError:
+            pass
+    # Continuous contracts (NQ.c.0, ES.c.0) - sort before individual contracts
+    if ".c." in item.symbol or ".n." in item.symbol or ".v." in item.symbol:
+        root = item.symbol.split(".")[0]
+        return (root, 0, 0, 0, schema_idx, item.schema_)
+    # Other symbols (AAPL, etc.) - sort alphabetically
+    return (item.symbol, 2, 0, 0, schema_idx, item.schema_)
+
+
 def _group_futures_contracts(
     items: list[CachedDataInfo],
 ) -> list[dict[str, str | int | list[CachedDataInfo]]]:
@@ -827,10 +853,25 @@ def _group_futures_contracts(
     for item in non_contracts:
         results.append({"type": "single", "items": [item]})
 
-    # Add contract groups
-    for (root, schema, dataset), group_items in sorted(contract_groups.items()):
-        # Sort by contract symbol
-        group_items.sort(key=lambda x: x.symbol)
+    # Add contract groups - sort by (root, schema_order)
+    def group_sort_key(
+        item: tuple[tuple[str, str, str], list[CachedDataInfo]],
+    ) -> tuple[str, int, str]:
+        (root, schema, _dataset), _items = item
+        return (root, _SCHEMA_ORDER.get(schema, 99), schema)
+
+    for (root, schema, dataset), group_items in sorted(
+        contract_groups.items(), key=group_sort_key
+    ):
+        # Sort contracts chronologically (year, month)
+        def contract_sort_key(item: CachedDataInfo) -> tuple[int, int]:
+            try:
+                _, month, year = parse_contract_symbol(item.symbol)
+                return (year, month)
+            except ValueError:
+                return (9999, 0)
+
+        group_items.sort(key=contract_sort_key)
 
         # Check for gaps - generate expected contracts and compare
         if len(group_items) >= 2:
@@ -864,16 +905,31 @@ def _group_futures_contracts(
             }
         )
 
-    # Sort results by symbol/root
-    def sort_key(r: dict[str, str | int | list[CachedDataInfo]]) -> str:
+    # Sort results: continuous contracts first, then groups, then other symbols
+    def result_sort_key(
+        r: dict[str, str | int | list[CachedDataInfo]],
+    ) -> tuple[str, int, int, str]:
         if r["type"] == "single":
             items_list = r["items"]
             if isinstance(items_list, list) and len(items_list) > 0:
-                return items_list[0].symbol
-            return ""
-        return str(r.get("root", ""))
+                item = items_list[0]
+                # Continuous contracts before individual contracts
+                if ".c." in item.symbol or ".n." in item.symbol or ".v." in item.symbol:
+                    root = item.symbol.split(".")[0]
+                    return (root, 0, _SCHEMA_ORDER.get(item.schema_, 99), item.schema_)
+                return (
+                    item.symbol,
+                    2,
+                    _SCHEMA_ORDER.get(item.schema_, 99),
+                    item.schema_,
+                )
+            return ("", 2, 99, "")
+        # Contract groups after continuous contracts
+        root = str(r.get("root", ""))
+        schema = str(r.get("schema", ""))
+        return (root, 1, _SCHEMA_ORDER.get(schema, 99), schema)
 
-    results.sort(key=sort_key)
+    results.sort(key=result_sort_key)
     return results
 
 
@@ -1012,7 +1068,9 @@ def _list_verbose(
     total_size: int,
 ) -> None:
     """Display cached data in verbose format."""
-    for i, item in enumerate(items):
+    sorted_items = sorted(items, key=_item_sort_key)
+
+    for i, item in enumerate(sorted_items):
         if i > 0:
             console.print()
 
