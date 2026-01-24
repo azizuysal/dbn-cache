@@ -113,6 +113,7 @@ class CachedDataInfo(BaseModel):
     schema_: str = Field(alias="schema")
     ranges: list[DateRange]
     size_bytes: int
+    quality_issues: list[DataQualityIssue] = []
 
     model_config = {"populate_by_name": True}
 

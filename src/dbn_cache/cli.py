@@ -1110,13 +1110,12 @@ def list_cached(
     total_items = len(items)
 
     if verbose:
-        _list_verbose(cache, items, total_items, total_size)
+        _list_verbose(items, total_items, total_size)
     else:
-        _list_table(cache, items, total_items, total_size)
+        _list_table(items, total_items, total_size)
 
 
 def _list_table(
-    cache: DataCache,
     items: list[CachedDataInfo],
     total_items: int,
     total_size: int,
@@ -1144,10 +1143,9 @@ def _list_table(
             ranges_str = format_date_ranges(item.ranges)
             size_str = _format_size(item.size_bytes)
 
-            # Get quality issues
-            issues = cache.get_quality_issues(item.symbol, item.schema_, item.dataset)
-            if issues:
-                quality_str = f"[yellow]⚠ {len(issues)}[/yellow]"
+            # Quality issues are already loaded with the item
+            if item.quality_issues:
+                quality_str = f"[yellow]⚠ {len(item.quality_issues)}[/yellow]"
             else:
                 quality_str = "[green]✓[/green]"
 
@@ -1172,13 +1170,8 @@ def _list_table(
             group_size = sum(i.size_bytes for i in group_items)
             size_str = _format_size(group_size)
 
-            # Quality issues across all contracts
-            total_issues = 0
-            for item in group_items:
-                issues = cache.get_quality_issues(
-                    item.symbol, item.schema_, item.dataset
-                )
-                total_issues += len(issues)
+            # Quality issues across all contracts (already loaded)
+            total_issues = sum(len(item.quality_issues) for item in group_items)
 
             if total_issues > 0:
                 quality_str = f"[yellow]⚠ {total_issues}[/yellow]"
@@ -1194,7 +1187,6 @@ def _list_table(
 
 
 def _list_verbose(
-    cache: DataCache,
     items: list[CachedDataInfo],
     total_items: int,
     total_size: int,
@@ -1217,11 +1209,12 @@ def _list_verbose(
         console.print(f"  Ranges:  {ranges_str}")
         console.print(f"  Size:    {size_str}")
 
-        # Show quality issues
-        issues = cache.get_quality_issues(item.symbol, item.schema_, item.dataset)
-        if issues:
-            console.print(f"  Quality: [yellow]⚠ {len(issues)} issues[/yellow]")
-            for issue in issues:
+        # Show quality issues (already loaded with item)
+        if item.quality_issues:
+            console.print(
+                f"  Quality: [yellow]⚠ {len(item.quality_issues)} issues[/yellow]"
+            )
+            for issue in item.quality_issues:
                 console.print(f"    [dim]{issue.date}: {issue.issue_type}[/dim]")
 
     console.print()

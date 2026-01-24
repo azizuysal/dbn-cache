@@ -1106,6 +1106,7 @@ class DataCache:
                                 schema=meta.schema_,
                                 ranges=meta.ranges,
                                 size_bytes=size,
+                                quality_issues=meta.quality_issues,
                             )
                         )
 
