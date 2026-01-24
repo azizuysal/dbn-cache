@@ -1,9 +1,12 @@
+"""CLI for dbn-cache - uses lazy imports for fast startup."""
+
+from __future__ import annotations
+
 import signal
 import sys
-from collections.abc import Callable
 from datetime import date, timedelta
 from functools import wraps
-from types import FrameType
+from typing import TYPE_CHECKING, Any
 
 import click
 from rich.console import Console, Group
@@ -23,36 +26,105 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
-from .cache import DataCache
-from .client import DatabentoClient
 from .exceptions import DownloadCancelledError, EmptyDataError, MissingAPIKeyError
-from .futures import (
-    generate_quarterly_contracts,
-    get_contract_dates,
-    is_supported_contract,
-    is_supported_root,
-    parse_contract_symbol,
-)
-from .models import (
-    CachedDataInfo,
-    CacheStatus,
-    DataQualityIssue,
-    DownloadProgress,
-    DownloadStatus,
-)
-from .utils import (
-    filter_by_symbol_prefix,
-    format_date_ranges,
-    has_lookahead_bias,
-    parse_date,
-    utc_today,
-)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from types import FrameType
+
+    from .cache import DataCache
+    from .models import (
+        CachedDataInfo,
+        DataQualityIssue,
+        DownloadProgress,
+    )
 
 console = Console()
 
 CONTEXT_SETTINGS = {
     "help_option_names": ["-h", "--help"],
 }
+
+
+# =============================================================================
+# Lazy imports for heavy modules (polars, pandas, databento, exchange_calendars)
+# =============================================================================
+
+
+def _import_cache() -> type:
+    """Lazy import DataCache."""
+    from .cache import DataCache
+
+    return DataCache
+
+
+def _import_client() -> type:
+    """Lazy import DatabentoClient."""
+    from .client import DatabentoClient
+
+    return DatabentoClient
+
+
+def _import_futures() -> dict[str, Any]:
+    """Lazy import futures module functions."""
+    from .futures import (
+        generate_quarterly_contracts,
+        get_contract_dates,
+        is_supported_contract,
+        is_supported_root,
+        parse_contract_symbol,
+    )
+
+    return {
+        "generate_quarterly_contracts": generate_quarterly_contracts,
+        "get_contract_dates": get_contract_dates,
+        "is_supported_contract": is_supported_contract,
+        "is_supported_root": is_supported_root,
+        "parse_contract_symbol": parse_contract_symbol,
+    }
+
+
+def _import_models() -> dict[str, Any]:
+    """Lazy import models."""
+    from .models import (
+        CachedDataInfo,
+        CacheStatus,
+        DataQualityIssue,
+        DownloadProgress,
+        DownloadStatus,
+    )
+
+    return {
+        "CachedDataInfo": CachedDataInfo,
+        "CacheStatus": CacheStatus,
+        "DataQualityIssue": DataQualityIssue,
+        "DownloadProgress": DownloadProgress,
+        "DownloadStatus": DownloadStatus,
+    }
+
+
+def _import_utils() -> dict[str, Any]:
+    """Lazy import utils."""
+    from .utils import (
+        filter_by_symbol_prefix,
+        format_date_ranges,
+        has_lookahead_bias,
+        parse_date,
+        utc_today,
+    )
+
+    return {
+        "filter_by_symbol_prefix": filter_by_symbol_prefix,
+        "format_date_ranges": format_date_ranges,
+        "has_lookahead_bias": has_lookahead_bias,
+        "parse_date": parse_date,
+        "utc_today": utc_today,
+    }
+
+
+# =============================================================================
+# CLI helpers
+# =============================================================================
 
 
 class RemainingTimeColumn(TimeRemainingColumn):
@@ -105,6 +177,9 @@ def _do_download(
     dataset: str,
 ) -> None:
     """Execute the download with progress bar."""
+    models = _import_models()
+    DownloadStatus = models["DownloadStatus"]
+
     cancelled = False
     original_handler = signal.getsignal(signal.SIGINT)
 
@@ -278,11 +353,21 @@ def _display_data_quality_issues(issues: list[DataQualityIssue]) -> None:
     )
 
 
+def _parse_date_option(value: str) -> date:
+    """Parse date from string for click options."""
+    utils = _import_utils()
+    return utils["parse_date"](value)
+
+
 @main.command()
 @click.argument("symbol")
 @click.option("--schema", "-s", required=True, help="Data schema (e.g., ohlcv-1m)")
-@click.option("--start", type=parse_date, default=None, help="Start date (YYYY-MM-DD)")
-@click.option("--end", type=parse_date, default=None, help="End date (YYYY-MM-DD)")
+@click.option(
+    "--start", type=_parse_date_option, default=None, help="Start date (YYYY-MM-DD)"
+)
+@click.option(
+    "--end", type=_parse_date_option, default=None, help="End date (YYYY-MM-DD)"
+)
 @click.option("--dataset", "-d", default="GLBX.MDP3", help="Databento dataset")
 @click.option("--force", "-f", is_flag=True, help="Force redownload without prompting")
 @click.option(
@@ -339,6 +424,20 @@ def download(
       NQ      = Root symbol (use with --from for batch)
       NQ.c.0  = Continuous futures (requires --start/--end)
     """
+    # Lazy imports
+    DataCache = _import_cache()
+    futures = _import_futures()
+    models = _import_models()
+    utils = _import_utils()
+
+    is_supported_contract = futures["is_supported_contract"]
+    is_supported_root = futures["is_supported_root"]
+    get_contract_dates = futures["get_contract_dates"]
+    generate_quarterly_contracts = futures["generate_quarterly_contracts"]
+    has_lookahead_bias = utils["has_lookahead_bias"]
+    utc_today = utils["utc_today"]
+    CacheStatus = models["CacheStatus"]
+
     symbol = _canonicalize_symbol(symbol)
 
     # Batch mode: download all quarterly contracts for a root symbol
@@ -478,6 +577,16 @@ def _batch_download(
     rollover_days: int,
 ) -> None:
     """Download multiple contracts with unified progress display."""
+    # Lazy imports
+    DataCache = _import_cache()
+    futures = _import_futures()
+    models = _import_models()
+    utils = _import_utils()
+
+    get_contract_dates = futures["get_contract_dates"]
+    CacheStatus = models["CacheStatus"]
+    utc_today = utils["utc_today"]
+
     cache = DataCache()
     total = len(contracts)
 
@@ -677,6 +786,13 @@ def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
       dbn update ES.c.0 -s ohlcv-1m  # Update specific schema
       dbn update --all               # Update everything in cache
     """
+    # Lazy imports
+    DataCache = _import_cache()
+    utils = _import_utils()
+
+    filter_by_symbol_prefix = utils["filter_by_symbol_prefix"]
+    has_lookahead_bias = utils["has_lookahead_bias"]
+
     if not symbol and not update_all:
         console.print("[red]Error:[/red] Either provide a SYMBOL or use --all flag")
         sys.exit(1)
@@ -802,6 +918,10 @@ def _item_sort_key(item: CachedDataInfo) -> tuple[str, int, int, int, int, str]:
     Order: root symbol, then continuous contracts before individual contracts,
     then chronologically by year/month, then schema (1d → 1h → 1m → 1s).
     """
+    futures = _import_futures()
+    is_supported_contract = futures["is_supported_contract"]
+    parse_contract_symbol = futures["parse_contract_symbol"]
+
     schema_idx = _SCHEMA_ORDER.get(item.schema_, 99)
     # Individual contracts (NQH25, ESZ24, etc.)
     if is_supported_contract(item.symbol):
@@ -820,7 +940,7 @@ def _item_sort_key(item: CachedDataInfo) -> tuple[str, int, int, int, int, str]:
 
 def _group_futures_contracts(
     items: list[CachedDataInfo],
-) -> list[dict[str, str | int | list[CachedDataInfo]]]:
+) -> list[dict[str, str | int | bool | list[CachedDataInfo]]]:
     """Group futures contracts by root symbol and schema.
 
     Returns a list of groups, where each group is either:
@@ -828,6 +948,10 @@ def _group_futures_contracts(
     - A group of contracts with the same root and schema
     """
     from collections import defaultdict
+
+    futures = _import_futures()
+    is_supported_contract = futures["is_supported_contract"]
+    parse_contract_symbol = futures["parse_contract_symbol"]
 
     # Separate contracts from non-contracts
     contract_groups: dict[tuple[str, str, str], list[CachedDataInfo]] = defaultdict(
@@ -847,7 +971,7 @@ def _group_futures_contracts(
             non_contracts.append(item)
 
     # Build result list
-    results: list[dict[str, str | int | list[CachedDataInfo]]] = []
+    results: list[dict[str, str | int | bool | list[CachedDataInfo]]] = []
 
     # Add non-contracts as individual items
     for item in non_contracts:
@@ -907,7 +1031,7 @@ def _group_futures_contracts(
 
     # Sort results: continuous contracts first, then groups, then other symbols
     def result_sort_key(
-        r: dict[str, str | int | list[CachedDataInfo]],
+        r: dict[str, str | int | bool | list[CachedDataInfo]],
     ) -> tuple[str, int, int, str]:
         if r["type"] == "single":
             items_list = r["items"]
@@ -957,6 +1081,11 @@ def list_cached(
       dbn list -v                 # Verbose output for all
       dbn list -v ES.c.0          # Verbose output for specific symbol
     """
+    # Lazy imports
+    DataCache = _import_cache()
+    utils = _import_utils()
+    filter_by_symbol_prefix = utils["filter_by_symbol_prefix"]
+
     cache = DataCache()
     items = cache.list_cached(dataset)
 
@@ -993,6 +1122,9 @@ def _list_table(
     total_size: int,
 ) -> None:
     """Display cached data in table format."""
+    utils = _import_utils()
+    format_date_ranges = utils["format_date_ranges"]
+
     table = Table(show_header=True, header_style="bold")
     table.add_column("Symbol", style="cyan")
     table.add_column("Schema", style="blue")
@@ -1068,6 +1200,9 @@ def _list_verbose(
     total_size: int,
 ) -> None:
     """Display cached data in verbose format."""
+    utils = _import_utils()
+    format_date_ranges = utils["format_date_ranges"]
+
     sorted_items = sorted(items, key=_item_sort_key)
 
     for i, item in enumerate(sorted_items):
@@ -1096,11 +1231,13 @@ def _list_verbose(
 @main.command()
 @click.argument("symbol")
 @click.option("--schema", "-s", required=True, help="Data schema")
-@click.option("--start", required=True, type=parse_date, help="Start date")
-@click.option("--end", required=True, type=parse_date, help="End date")
+@click.option("--start", required=True, type=_parse_date_option, help="Start date")
+@click.option("--end", required=True, type=_parse_date_option, help="End date")
 @click.option("--dataset", "-d", default="GLBX.MDP3", help="Databento dataset")
 def cost(symbol: str, schema: str, start: date, end: date, dataset: str) -> None:
     """Estimate download cost."""
+    DatabentoClient = _import_client()
+
     symbol = _canonicalize_symbol(symbol)
     try:
         client = DatabentoClient()
@@ -1149,6 +1286,15 @@ def verify(
     symbol: str | None, schema: str | None, dataset: str | None, fix: bool
 ) -> None:
     """Verify cache integrity (check for missing files)."""
+    # Lazy imports
+    DataCache = _import_cache()
+    models = _import_models()
+    utils = _import_utils()
+
+    filter_by_symbol_prefix = utils["filter_by_symbol_prefix"]
+    format_date_ranges = utils["format_date_ranges"]
+    CacheStatus = models["CacheStatus"]
+
     cache = DataCache()
 
     # First, repair orphaned parquet files (files without metadata)
@@ -1322,8 +1468,8 @@ def completions(shell: str) -> None:
 @click.argument("symbol")
 @click.option("--schema", "-s", default=None, help="Data schema (optional)")
 @click.option("--dataset", "-d", default=None, help="Databento dataset (optional)")
-@click.option("--start", type=parse_date, help="Filter by start date")
-@click.option("--end", type=parse_date, help="Filter by end date")
+@click.option("--start", type=_parse_date_option, help="Filter by start date")
+@click.option("--end", type=_parse_date_option, help="Filter by end date")
 def quality(
     symbol: str,
     schema: str | None,
@@ -1337,6 +1483,11 @@ def quality(
     Symbol matching is case-insensitive and supports prefix matching
     (e.g., 'nq' matches 'NQ.c.0', 'NQU24', etc.).
     """
+    # Lazy imports
+    DataCache = _import_cache()
+    utils = _import_utils()
+    filter_by_symbol_prefix = utils["filter_by_symbol_prefix"]
+
     display_symbol = _canonicalize_symbol(symbol)
     cache = DataCache()
     all_cached = cache.list_cached(dataset)

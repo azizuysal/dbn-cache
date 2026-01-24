@@ -36,7 +36,7 @@ class TestCliHelp:
 class TestCliDownload:
     def test_download_success(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
 
@@ -58,7 +58,7 @@ class TestCliDownload:
 
     def test_download_lookahead_bias_warning(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
 
@@ -80,7 +80,7 @@ class TestCliDownload:
 
     def test_download_cancelled(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.download.side_effect = DownloadCancelledError(2, 5)
 
@@ -103,7 +103,7 @@ class TestCliDownload:
 
     def test_download_permission_error(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             err = PermissionError("Permission denied")
             err.filename = "/path/to/file"
@@ -127,7 +127,7 @@ class TestCliDownload:
 
     def test_download_storage_error(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.download.side_effect = OSError("No space left on device")
 
@@ -149,7 +149,7 @@ class TestCliDownload:
 
     def test_download_generic_error(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.download.side_effect = ValueError("Something went wrong")
 
@@ -177,7 +177,7 @@ class TestCliDownload:
 
     def test_download_missing_api_key(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.download.side_effect = MissingAPIKeyError()
 
@@ -248,7 +248,7 @@ class TestCliBatchDownload:
 class TestCliList:
     def test_list_empty(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.list_cached.return_value = []
 
@@ -260,7 +260,7 @@ class TestCliList:
 class TestCliCost:
     def test_cost(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DatabentoClient") as mock_client_cls:
+        with patch("dbn_cache.client.DatabentoClient") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             mock_client.get_cost.return_value = 12.50
 
@@ -304,7 +304,7 @@ class TestCliUpdate:
 
     def test_update_no_cached_data(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.list_cached.return_value = []
 
@@ -315,7 +315,7 @@ class TestCliUpdate:
 
     def test_update_already_up_to_date(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.list_cached.return_value = [
                 CachedDataInfo(
@@ -334,7 +334,7 @@ class TestCliUpdate:
 
     def test_update_success(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.list_cached.return_value = [
                 CachedDataInfo(
@@ -358,7 +358,7 @@ class TestCliUpdate:
 
     def test_update_all_schemas(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.list_cached.return_value = [
                 CachedDataInfo(
@@ -389,7 +389,7 @@ class TestCliUpdate:
 
     def test_update_lookahead_bias_warning(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.list_cached.return_value = [
                 CachedDataInfo(
@@ -412,7 +412,7 @@ class TestCliUpdate:
 
     def test_update_all_flag(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.list_cached.return_value = [
                 CachedDataInfo(
@@ -444,7 +444,7 @@ class TestCliUpdate:
 
     def test_update_all_empty_cache(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.list_cached.return_value = []
 
@@ -454,7 +454,7 @@ class TestCliUpdate:
 
     def test_update_no_symbol_no_cached_data(self) -> None:
         runner = CliRunner()
-        with patch("dbn_cache.cli.DataCache") as mock_cache_cls:
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
             mock_cache = mock_cache_cls.return_value
             mock_cache.list_cached.return_value = []
 

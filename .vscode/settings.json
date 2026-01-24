@@ -52,5 +52,6 @@
     "venv",
     "webassets",
     "XNAS"
-  ]
+  ],
+  "snyk.advanced.autoSelectOrganization": true
 }
