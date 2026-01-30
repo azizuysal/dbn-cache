@@ -315,11 +315,11 @@ class TestDataCacheUpdateAll:
         assert not result.has_errors
 
 
-class TestAutoHealFragmentedRanges:
-    """Test that fragmented metadata ranges are consolidated on load."""
+class TestValidateMetadata:
+    """Test that metadata validation detects and fixes mismatches."""
 
-    def test_fragmented_ranges_consolidated(self, tmp_path: Path) -> None:
-        """Multiple fragmented ranges should be consolidated into one."""
+    def test_fragmented_ranges_detected(self, tmp_path: Path) -> None:
+        """Fragmented ranges should be detected by validate_metadata."""
         cache = DataCache(cache_dir=tmp_path)
 
         base_path = tmp_path / "GLBX.MDP3" / "ES_c_0" / "ohlcv-1m"
@@ -340,7 +340,7 @@ class TestAutoHealFragmentedRanges:
         )
         df.write_parquet(base_path / "2024" / "01.parquet")
 
-        # Create metadata with FRAGMENTED ranges (simulating the bug)
+        # Create metadata with FRAGMENTED ranges
         meta = SymbolMeta(
             dataset="GLBX.MDP3",
             symbol="ES.c.0",
@@ -359,10 +359,19 @@ class TestAutoHealFragmentedRanges:
         with meta_path.open("w") as f:
             json.dump(meta.model_dump(by_alias=True), f, default=str)
 
-        # Load metadata - should trigger auto-heal
+        # Loading metadata should NOT auto-fix (returns fragmented as-is)
         info = cache.info("ES.c.0", "ohlcv-1m")
+        assert info is not None
+        assert len(info.ranges) == 3
 
-        # Should be consolidated to a single range
+        # validate_metadata should detect the mismatch
+        issues = cache.validate_metadata()
+        assert len(issues) == 1
+        assert issues[0][1] == "ES.c.0"
+
+        # validate_metadata with fix=True should consolidate
+        cache.validate_metadata(fix=True)
+        info = cache.info("ES.c.0", "ohlcv-1m")
         assert info is not None
         assert len(info.ranges) == 1
         assert info.ranges[0].start == date(2024, 1, 15)

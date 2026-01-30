@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import signal
 import sys
 from datetime import date, timedelta
 from functools import wraps
@@ -30,7 +29,6 @@ from .exceptions import DownloadCancelledError, EmptyDataError, MissingAPIKeyErr
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from types import FrameType
 
     from .cache import DataCache
     from .models import (
@@ -180,9 +178,6 @@ def _do_download(
     models = _import_models()
     DownloadStatus = models["DownloadStatus"]
 
-    cancelled = False
-    original_handler = signal.getsignal(signal.SIGINT)
-
     bar_column = BarColumn(
         bar_width=30,
         complete_style="green",
@@ -199,61 +194,49 @@ def _do_download(
         console=console,
     )
 
-    def handle_sigint(signum: int, frame: FrameType | None) -> None:
-        nonlocal cancelled
-        cancelled = True
-        progress.console.print("[yellow]Cancelling...[/yellow]")
-
-    signal.signal(signal.SIGINT, handle_sigint)
-
     try:
-        try:
-            with progress:
-                task_id = progress.add_task(f"Downloading {symbol}", total=None)
-                completed = 0
-                warned = False
+        with progress:
+            task_id = progress.add_task(f"Downloading {symbol}", total=None)
+            completed = 0
+            warned = False
 
-                def on_progress(p: DownloadProgress) -> None:
-                    nonlocal completed, warned
-                    if progress.tasks[task_id].total is None:
-                        progress.update(task_id, total=p.total)
+            def on_progress(p: DownloadProgress) -> None:
+                nonlocal completed, warned
+                if progress.tasks[task_id].total is None:
+                    progress.update(task_id, total=p.total)
 
-                    if p.quality_warnings > 0 and not warned:
-                        warned = True
-                        bar_column.complete_style = "yellow"
-                        bar_column.finished_style = "yellow"
+                if p.quality_warnings > 0 and not warned:
+                    warned = True
+                    bar_column.complete_style = "yellow"
+                    bar_column.finished_style = "yellow"
 
-                    if p.status == DownloadStatus.DOWNLOADING:
-                        progress.update(
-                            task_id,
-                            description=f"Downloading {symbol} [{p.partition.label}]",
-                        )
-                    elif p.status == DownloadStatus.COMPLETED:
-                        completed = p.current
-                        progress.update(task_id, completed=completed)
+                if p.status == DownloadStatus.DOWNLOADING:
+                    progress.update(
+                        task_id,
+                        description=f"Downloading {symbol} [{p.partition.label}]",
+                    )
+                elif p.status == DownloadStatus.COMPLETED:
+                    completed = p.current
+                    progress.update(task_id, completed=completed)
 
-                result = cache.download(
-                    symbol,
-                    schema,
-                    start,
-                    end,
-                    dataset,
-                    on_progress=on_progress,
-                    cancelled=lambda: cancelled,
-                )
-
-            console.print(
-                f"[green]Successfully cached {len(result.paths)} file(s) "
-                f"for {symbol}[/green]"
+            result = cache.download(
+                symbol,
+                schema,
+                start,
+                end,
+                dataset,
+                on_progress=on_progress,
             )
 
-        finally:
-            issues = cache.get_quality_issues(symbol, schema, dataset, start, end)
-            if issues:
-                _display_data_quality_issues(issues)
+        console.print(
+            f"[green]Successfully cached {len(result.paths)} file(s) "
+            f"for {symbol}[/green]"
+        )
 
     finally:
-        signal.signal(signal.SIGINT, original_handler)
+        issues = cache.get_quality_issues(symbol, schema, dataset, start, end)
+        if issues:
+            _display_data_quality_issues(issues)
 
 
 def _handle_download_errors[**P, T](func: Callable[P, T]) -> Callable[P, T]:
@@ -605,14 +588,6 @@ def _batch_download(
     partition_total = 0
     current_has_warnings = False
 
-    # Signal handling for Ctrl+C
-    cancel_requested = False
-    original_handler = signal.getsignal(signal.SIGINT)
-
-    def handle_sigint(signum: int, frame: FrameType | None) -> None:
-        nonlocal cancel_requested
-        cancel_requested = True
-
     def build_display() -> Group:
         """Build the live display content."""
         lines: list[str] = []
@@ -651,15 +626,9 @@ def _batch_download(
 
         return Group(*[Text.from_markup(line) for line in lines])
 
-    signal.signal(signal.SIGINT, handle_sigint)
-
     try:
         with Live(build_display(), console=console, refresh_per_second=10) as live:
             for contract in contracts:
-                if cancel_requested:
-                    cancelled = True
-                    break
-
                 current_contract = contract
                 current_partition = ""
                 partition_current = 0
@@ -705,7 +674,6 @@ def _batch_download(
                         end,
                         dataset,
                         on_progress=on_progress,
-                        cancelled=lambda: cancel_requested,
                     )
 
                     # Check for quality issues
@@ -719,7 +687,7 @@ def _batch_download(
 
                 except EmptyDataError:
                     skip_count += 1
-                except DownloadCancelledError:
+                except KeyboardInterrupt:
                     cancelled = True
                     break
                 except Exception as e:
@@ -731,8 +699,8 @@ def _batch_download(
         # Final display is shown by Live context exit
         current_contract = ""  # Clear current contract indicator
 
-    finally:
-        signal.signal(signal.SIGINT, original_handler)
+    except KeyboardInterrupt:
+        cancelled = True
 
     # Print final summary
     console.print()
@@ -853,39 +821,43 @@ def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
     error_count = 0
     errors: list[tuple[str, str, str]] = []
     warned_symbols: set[str] = set()
+    cancelled = False
 
-    for item in matches:
-        if has_lookahead_bias(item.symbol) and item.symbol not in warned_symbols:
-            warned_symbols.add(item.symbol)
+    try:
+        for item in matches:
+            if has_lookahead_bias(item.symbol) and item.symbol not in warned_symbols:
+                warned_symbols.add(item.symbol)
+                console.print(
+                    f"[yellow]⚠ {item.symbol} has look-ahead bias "
+                    f"(volume/OI-based rolls)[/yellow]"
+                )
+
+            update_range = cache.get_update_range(item)
+            if update_range is None:
+                up_to_date_count += 1
+                continue
+
+            start, end = update_range
             console.print(
-                f"[yellow]⚠ {item.symbol} has look-ahead bias "
-                f"(volume/OI-based rolls)[/yellow]"
+                f"Updating [cyan]{item.symbol}[/cyan]/[blue]{item.schema_}[/blue] "
+                f"from {start} to {end}"
             )
 
-        update_range = cache.get_update_range(item)
-        if update_range is None:
-            up_to_date_count += 1
-            continue
-
-        start, end = update_range
-        console.print(
-            f"Updating [cyan]{item.symbol}[/cyan]/[blue]{item.schema_}[/blue] "
-            f"from {start} to {end}"
-        )
-
-        try:
-            _do_download(cache, item.symbol, item.schema_, start, end, item.dataset)
-            updated_count += 1
-        except DownloadCancelledError:
-            raise
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            error_count += 1
-            errors.append((item.symbol, item.schema_, str(e)))
-            console.print("  [red]✗ Failed[/red]")
+            try:
+                _do_download(cache, item.symbol, item.schema_, start, end, item.dataset)
+                updated_count += 1
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                error_count += 1
+                errors.append((item.symbol, item.schema_, str(e)))
+                console.print("  [red]✗ Failed[/red]")
+    except KeyboardInterrupt:
+        cancelled = True
 
     console.print()
+    if cancelled:
+        console.print("[yellow]Cancelled[/yellow]")
     if updated_count > 0:
         console.print(f"[green]✓ Updated {updated_count} item(s)[/green]")
     if up_to_date_count > 0:
@@ -894,6 +866,10 @@ def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
         console.print(f"[red]✗ {error_count} item(s) failed:[/red]")
         for sym, sch, err in errors:
             console.print(f"  [red]• {sym}/{sch}: {err}[/red]")
+
+    if cancelled:
+        sys.exit(130)
+    if error_count > 0:
         sys.exit(1)
 
 
@@ -1290,11 +1266,16 @@ def verify(
 
     cache = DataCache()
 
-    # First, repair orphaned parquet files (files without metadata)
     if fix:
+        # Repair orphaned parquet files (files without metadata)
         repaired = cache.repair_metadata(dataset)
         for ds, sym, sch in repaired:
             console.print(f"[green]✓[/green] Rebuilt metadata for {sym}/{sch} ({ds})")
+
+        # Fix metadata date ranges that don't match actual parquet data
+        validated = cache.validate_metadata(dataset, fix=True)
+        for _ds, sym, sch, msg in validated:
+            console.print(f"[green]✓[/green] Fixed metadata for {sym}/{sch}: {msg}")
 
     all_cached = cache.list_cached(dataset)
 
@@ -1309,6 +1290,17 @@ def verify(
         return
 
     issues_found = 0
+
+    # Check for metadata date mismatches (when not already fixed above)
+    if not fix:
+        validated = cache.validate_metadata(dataset)
+        for _ds, sym, sch, msg in validated:
+            issues_found += 1
+            console.print(
+                f"[yellow]⚠[/yellow] {sym}/{sch}: "
+                f"metadata dates don't match data ({msg})"
+            )
+
     for item in all_cached:
         for r in item.ranges:
             check = cache.check_cache(
@@ -1330,7 +1322,7 @@ def verify(
     if issues_found == 0:
         console.print(f"[green]✓[/green] All {len(all_cached)} cached items verified")
     elif not fix:
-        console.print("\n[dim]Run with --fix to remove stale metadata[/dim]")
+        console.print("\n[dim]Run with --fix to repair issues[/dim]")
 
 
 DATASETS: dict[str, str] = {

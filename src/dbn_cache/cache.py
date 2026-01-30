@@ -202,30 +202,13 @@ class DataCache:
             yield
 
     def _load_meta(self, dataset: str, symbol: str, schema: str) -> SymbolMeta | None:
-        """Load metadata from cache, auto-fixing if dates don't match actual data."""
+        """Load metadata from cache."""
         meta_path = self._get_meta_path(dataset, symbol, schema)
         if not meta_path.exists():
             return None
         with meta_path.open() as f:
             data = json.load(f)
-        meta = SymbolMeta.model_validate(data)
-
-        # Auto-heal: verify metadata matches actual parquet data
-        fixed_meta = self._validate_and_fix_meta(meta)
-        if fixed_meta is not None:
-            old_end = meta.ranges[-1].end if meta.ranges else None
-            new_end = fixed_meta.ranges[-1].end if fixed_meta.ranges else None
-            logger.warning(
-                "Auto-fixed metadata for %s/%s: %s -> %s",
-                meta.symbol,
-                meta.schema_,
-                old_end,
-                new_end,
-            )
-            self._save_meta(fixed_meta)
-            return fixed_meta
-
-        return meta
+        return SymbolMeta.model_validate(data)
 
     def _validate_and_fix_meta(self, meta: SymbolMeta) -> SymbolMeta | None:
         """Validate metadata against actual parquet files and fix if needed.
@@ -814,7 +797,7 @@ class DataCache:
                                 continue
                             dest.parent.mkdir(parents=True, exist_ok=True)
                             shutil.move(tmp_path, dest)
-                        except Exception:
+                        except BaseException:
                             tmp_path.unlink(missing_ok=True)
                             raise
 
@@ -1136,6 +1119,62 @@ class DataCache:
             ranges=meta.ranges,
             size_bytes=size,
         )
+
+    def validate_metadata(
+        self, dataset: str | None = None, *, fix: bool = False
+    ) -> list[tuple[str, str, str, str]]:
+        """Validate metadata date ranges against actual parquet data.
+
+        Checks that metadata start/end dates match the actual data in parquet
+        files. Mismatches can occur when partition boundaries (month-end dates)
+        are stored in metadata but the actual data ends earlier (e.g., expired
+        futures contracts).
+
+        Args:
+            dataset: Filter by dataset. If None, validate all.
+            fix: If True, fix mismatched metadata.
+
+        Returns:
+            List of (dataset, symbol, schema, message) tuples for each mismatch.
+        """
+        results: list[tuple[str, str, str, str]] = []
+
+        if dataset:
+            datasets = [dataset]
+        else:
+            if not self._cache_dir.exists():
+                return []
+            datasets = [d.name for d in self._cache_dir.iterdir() if d.is_dir()]
+
+        for ds in datasets:
+            ds_path = self._cache_dir / ds
+            if not ds_path.exists():
+                continue
+            for symbol_dir in ds_path.iterdir():
+                if not symbol_dir.is_dir():
+                    continue
+                for schema_dir in symbol_dir.iterdir():
+                    if not schema_dir.is_dir():
+                        continue
+                    meta = self._load_meta(ds, symbol_dir.name, schema_dir.name)
+                    if meta is None:
+                        continue
+                    fixed = self._validate_and_fix_meta(meta)
+                    if fixed is not None:
+                        old_end = meta.ranges[-1].end if meta.ranges else None
+                        new_end = fixed.ranges[-1].end if fixed.ranges else None
+                        msg = f"{old_end} -> {new_end}"
+                        results.append((ds, meta.symbol, meta.schema_, msg))
+                        if fix:
+                            self._save_meta(fixed)
+                            logger.info(
+                                "Fixed metadata for %s/%s: %s",
+                                meta.symbol,
+                                meta.schema_,
+                                msg,
+                            )
+
+        return results
 
     def repair_metadata(self, dataset: str | None = None) -> list[tuple[str, str, str]]:
         """Find and rebuild metadata for orphaned parquet files.
