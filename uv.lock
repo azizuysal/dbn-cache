@@ -283,7 +283,7 @@ wheels = [
 
 [[package]]
 name = "dbn-cache"
-version = "1.2.2"
+version = "1.2.3"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -312,7 +312,7 @@ requires-dist = [
     { name = "databento", specifier = ">=0.40" },
     { name = "exchange-calendars", specifier = ">=4.12" },
     { name = "filelock", specifier = ">=3.0" },
-    { name = "pandas", specifier = ">=2.0" },
+    { name = "pandas", specifier = ">=2.0,<3" },
     { name = "polars", specifier = ">=1.0" },
     { name = "pyarrow", specifier = ">=18.0" },
     { name = "pydantic", specifier = ">=2.0" },

@@ -20,7 +20,7 @@ requires-python = ">=3.13"
 dependencies = [
     "databento>=0.40",
     "polars>=1.0",
-    "pandas>=2.0",
+    "pandas>=2.0,<3",
     "pyarrow>=18.0",
     "click>=8.0",
     "pydantic>=2.0",
