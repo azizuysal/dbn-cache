@@ -65,7 +65,7 @@ dbn download ESZ24 --schema trades --start 2024-11-01 --end 2024-12-01
 # Download from different dataset (default: GLBX.MDP3)
 dbn download AAPL --schema trades --start 2024-01-01 --end 2024-01-31 -d XNAS.ITCH
 
-# Update cached data to yesterday (historical data has 24h delay)
+# Update cached data to latest available (data has ~24h embargo)
 dbn update ES.c.0                # Update all schemas for symbol
 dbn update ES.c.0 -s ohlcv-1m    # Update specific schema
 dbn update --all                  # Update everything in cache
@@ -199,7 +199,7 @@ df = data.to_pandas()
 # Ensure data is cached (downloads only if missing)
 data = cache.ensure("ES.c.0", "ohlcv-1m", date(2024, 1, 1), date(2024, 12, 1))
 
-# Update cached data to yesterday (returns None if already up to date)
+# Update cached data to latest available (returns None if already up to date)
 data = cache.update("ES.c.0", "ohlcv-1m")  # Dataset inferred from cache
 
 # Update all cached data

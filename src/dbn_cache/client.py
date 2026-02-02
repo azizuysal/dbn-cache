@@ -53,6 +53,14 @@ class DatabentoClient:
             end=end.isoformat(),
         )
 
+    def get_dataset_range(self, dataset: str = "GLBX.MDP3") -> dict[str, str]:
+        """Get available date range for a dataset.
+
+        Returns:
+            Dict with 'start' and 'end' keys (ISO format, exclusive end).
+        """
+        return self._client.metadata.get_dataset_range(dataset=dataset)
+
     def get_cost(
         self,
         symbol: str,

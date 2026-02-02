@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -275,6 +275,114 @@ class TestGetUpdateRangeExpiredContracts:
         _start, end = update_range
         # End should be yesterday, not capped at any expiration
         assert end > date(2024, 3, 15)
+
+
+class TestGetUpdateRangeAvailableEnd:
+    """Test get_update_range clamps to available data on Databento."""
+
+    def test_clamps_end_to_available_data(self, tmp_path: Path) -> None:
+        """End date should be clamped to available data range."""
+        from unittest.mock import MagicMock
+
+        from dbn_cache.models import CachedDataInfo
+
+        client = MagicMock()
+        client.get_dataset_range.return_value = {
+            "start": "2010-06-06T00:00:00.000000000Z",
+            "end": "2026-01-31T00:00:00.000000000Z",
+        }
+        cache = DataCache(cache_dir=tmp_path, client=client)
+
+        cached_info = CachedDataInfo(
+            dataset="GLBX.MDP3",
+            symbol="ES.c.0",
+            schema="ohlcv-1d",
+            ranges=[DateRange(start=date(2026, 1, 1), end=date(2026, 1, 28))],
+            size_bytes=1000,
+        )
+
+        update_range = cache.get_update_range(cached_info)
+        assert update_range is not None
+        start, end = update_range
+        assert start == date(2026, 1, 29)
+        # API end is exclusive 2026-01-31 → inclusive 2026-01-30
+        assert end == date(2026, 1, 30)
+
+    def test_returns_none_when_already_at_available_end(self, tmp_path: Path) -> None:
+        """Should return None if cached data is already at the available end."""
+        from unittest.mock import MagicMock
+
+        from dbn_cache.models import CachedDataInfo
+
+        client = MagicMock()
+        client.get_dataset_range.return_value = {
+            "end": "2026-01-31T00:00:00.000000000Z",
+        }
+        cache = DataCache(cache_dir=tmp_path, client=client)
+
+        cached_info = CachedDataInfo(
+            dataset="GLBX.MDP3",
+            symbol="ES.c.0",
+            schema="ohlcv-1d",
+            ranges=[DateRange(start=date(2026, 1, 1), end=date(2026, 1, 30))],
+            size_bytes=1000,
+        )
+
+        update_range = cache.get_update_range(cached_info)
+        assert update_range is None
+
+    def test_caches_available_end_per_dataset(self, tmp_path: Path) -> None:
+        """Available end should be fetched once per dataset."""
+        from unittest.mock import MagicMock
+
+        from dbn_cache.models import CachedDataInfo
+
+        client = MagicMock()
+        client.get_dataset_range.return_value = {
+            "end": "2026-01-31T00:00:00.000000000Z",
+        }
+        cache = DataCache(cache_dir=tmp_path, client=client)
+
+        info1 = CachedDataInfo(
+            dataset="GLBX.MDP3",
+            symbol="ES.c.0",
+            schema="ohlcv-1d",
+            ranges=[DateRange(start=date(2026, 1, 1), end=date(2026, 1, 20))],
+            size_bytes=1000,
+        )
+        info2 = CachedDataInfo(
+            dataset="GLBX.MDP3",
+            symbol="NQ.c.0",
+            schema="ohlcv-1m",
+            ranges=[DateRange(start=date(2026, 1, 1), end=date(2026, 1, 20))],
+            size_bytes=1000,
+        )
+
+        cache.get_update_range(info1)
+        cache.get_update_range(info2)
+        client.get_dataset_range.assert_called_once_with("GLBX.MDP3")
+
+    def test_falls_back_when_api_unavailable(self, tmp_path: Path) -> None:
+        """Should fall back to yesterday when API is unavailable."""
+        from dbn_cache.models import CachedDataInfo
+
+        cache = DataCache(cache_dir=tmp_path)
+
+        cached_info = CachedDataInfo(
+            dataset="GLBX.MDP3",
+            symbol="ES.c.0",
+            schema="ohlcv-1d",
+            ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 6, 1))],
+            size_bytes=1000,
+        )
+
+        update_range = cache.get_update_range(cached_info)
+        assert update_range is not None
+        _, end = update_range
+        # Without API, falls back to yesterday
+        from dbn_cache.utils import utc_today
+
+        assert end == utc_today() - timedelta(days=1)
 
 
 class TestDataCacheUpdateAll:

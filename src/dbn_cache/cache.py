@@ -153,6 +153,7 @@ class DataCache:
             cache_dir = Path(env_dir) if env_dir else get_default_cache_dir()
         self._cache_dir = cache_dir
         self._client = client
+        self._available_end_cache: dict[str, date] = {}
 
     @property
     def cache_dir(self) -> Path:
@@ -164,6 +165,24 @@ class DataCache:
         if self._client is None:
             self._client = DatabentoClient()
         return self._client
+
+    def _get_available_end(self, dataset: str) -> date | None:
+        """Get the last date with available data for a dataset.
+
+        Returns the inclusive end date, or None if unavailable.
+        Results are cached per dataset for the lifetime of this instance.
+        """
+        if dataset in self._available_end_cache:
+            return self._available_end_cache[dataset]
+        try:
+            client = self._get_client()
+            result = client.get_dataset_range(dataset)
+            exclusive_end = date.fromisoformat(result["end"][:10])
+            inclusive_end = exclusive_end - timedelta(days=1)
+            self._available_end_cache[dataset] = inclusive_end
+            return inclusive_end
+        except Exception:
+            return None
 
     def _get_symbol_path(self, dataset: str, symbol: str, schema: str) -> Path:
         """Get path to symbol/schema cache directory."""
@@ -913,12 +932,13 @@ class DataCache:
     ) -> tuple[date, date] | None:
         """Get the date range needed to update cached data.
 
-        For specific futures contracts (e.g., NQH25), the end date is capped
-        at the contract's expiration date - no data exists after expiration.
+        The end date is clamped to the dataset's available range on Databento
+        (data has ~24h embargo). For specific futures contracts (e.g., NQH25),
+        it is further capped at the contract's expiration date.
 
         Args:
             cached_info: Cached data info from list_cached()
-            end: End date (defaults to yesterday UTC, or expiration for futures)
+            end: End date (defaults to yesterday UTC, clamped to available data)
 
         Returns:
             Tuple of (start, end) dates if update is needed, None if up to date
@@ -930,6 +950,11 @@ class DataCache:
         last_cached = cached_info.ranges[-1].end
         start = last_cached + timedelta(days=1)
         end_date = end or (utc_today() - timedelta(days=1))
+
+        # Clamp to data actually available on Databento
+        available_end = self._get_available_end(cached_info.dataset)
+        if available_end is not None:
+            end_date = min(end_date, available_end)
 
         # For specific futures contracts, cap at expiration date
         if is_supported_contract(cached_info.symbol):

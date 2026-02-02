@@ -286,7 +286,7 @@ class TestCliUpdate:
         runner = CliRunner()
         result = runner.invoke(main, ["update", "-h"])
         assert result.exit_code == 0
-        assert "Update cached data from last cached date to yesterday" in result.output
+        assert "Update cached data to the latest available date" in result.output
         assert "--schema" in result.output
         assert "--all" in result.output
 

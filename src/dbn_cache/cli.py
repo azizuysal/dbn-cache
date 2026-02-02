@@ -742,11 +742,11 @@ def _batch_download(
 @click.option("--schema", "-s", default=None, help="Schema to update (all if omitted)")
 @click.option("--all", "update_all", is_flag=True, help="Update all cached data")
 def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
-    """Update cached data from last cached date to yesterday (UTC).
+    """Update cached data to the latest available date.
 
     Downloads new data since the last update. Requires existing cached data.
-    Dataset is inferred from the cached metadata. Historical data has a 24-hour
-    embargo, so yesterday UTC is used as the default end date.
+    Dataset is inferred from the cached metadata. The end date is automatically
+    clamped to the dataset's available range on Databento.
 
     \b
     Examples:
