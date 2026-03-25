@@ -909,6 +909,16 @@ def update(
         parse_contract_symbol = futures["parse_contract_symbol"]
         get_expiration_date_fn = futures["get_expiration_date"]
 
+        # Re-read cached state after updates so roll check sees current end dates
+        all_cached = cache.list_cached()
+        if update_all:
+            matches = all_cached
+        else:
+            assert symbol is not None
+            matches = filter_by_symbol_prefix(all_cached, symbol)
+            if schema:
+                matches = [m for m in matches if m.schema_ == schema]
+
         expired_contracts: dict[str, list[str]] = {}
 
         for item in matches:
@@ -1072,7 +1082,7 @@ def _group_futures_contracts(
     def group_sort_key(
         item: tuple[tuple[str, str, str], list[CachedDataInfo]],
     ) -> tuple[str, int, str]:
-        (root, schema, _dataset), _items = item
+        (root, schema, _), _ = item
         return (root, _SCHEMA_ORDER.get(schema, 99), schema)
 
     for (root, schema, dataset), group_items in sorted(
@@ -1389,7 +1399,7 @@ def verify(
 
         # Fix metadata date ranges that don't match actual parquet data
         validated = cache.validate_metadata(dataset, fix=True)
-        for _ds, sym, sch, msg in validated:
+        for _, sym, sch, msg in validated:
             console.print(f"[green]✓[/green] Fixed metadata for {sym}/{sch}: {msg}")
 
     all_cached = cache.list_cached(dataset)
@@ -1409,7 +1419,7 @@ def verify(
     # Check for metadata date mismatches (when not already fixed above)
     if not fix:
         validated = cache.validate_metadata(dataset)
-        for _ds, sym, sch, msg in validated:
+        for _, sym, sch, msg in validated:
             issues_found += 1
             console.print(
                 f"[yellow]⚠[/yellow] {sym}/{sch}: "
