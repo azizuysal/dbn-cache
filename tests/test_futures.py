@@ -11,6 +11,8 @@ from dbn_cache.futures import (
     generate_quarterly_contracts,
     get_contract_dates,
     get_expiration_date,
+    get_front_month_contract,
+    get_next_contract,
     is_supported_contract,
     is_supported_root,
     parse_contract_symbol,
@@ -421,3 +423,91 @@ class TestEdgeCases:
         # Previous contract is September
         assert start.month == 9
         assert start.year == 2024
+
+
+class TestGetNextContract:
+    def test_march_to_june(self) -> None:
+        assert get_next_contract("NQH25") == "NQM25"
+
+    def test_june_to_september(self) -> None:
+        assert get_next_contract("NQM25") == "NQU25"
+
+    def test_september_to_december(self) -> None:
+        assert get_next_contract("NQU25") == "NQZ25"
+
+    def test_december_to_march_next_year(self) -> None:
+        assert get_next_contract("NQZ25") == "NQH26"
+
+    def test_micro_contract(self) -> None:
+        assert get_next_contract("MNQH26") == "MNQM26"
+
+    def test_treasury_contract(self) -> None:
+        assert get_next_contract("ZNH25") == "ZNM25"
+
+    def test_metals_quarterly_contract(self) -> None:
+        assert get_next_contract("GCM25") == "GCU25"
+
+    def test_non_quarterly_month(self) -> None:
+        assert get_next_contract("GCJ25") == "GCM25"
+
+    def test_non_quarterly_november(self) -> None:
+        assert get_next_contract("GCX25") == "GCZ25"
+
+    def test_case_insensitive(self) -> None:
+        assert get_next_contract("nqh25") == "NQM25"
+
+    def test_unsupported_root_raises(self) -> None:
+        with pytest.raises(ValueError, match="Cannot auto-detect"):
+            get_next_contract("VXH25")
+
+    def test_non_contract_raises(self) -> None:
+        with pytest.raises(ValueError, match="Could not parse"):
+            get_next_contract("ES.c.0")
+
+
+class TestGetFrontMonthContract:
+    def test_before_march_expiry(self) -> None:
+        result = get_front_month_contract("NQ", date(2025, 3, 1))
+        assert result == "NQH25"
+
+    def test_after_march_expiry_before_june(self) -> None:
+        result = get_front_month_contract("NQ", date(2025, 3, 22))
+        assert result == "NQM25"
+
+    def test_on_expiry_day(self) -> None:
+        result = get_front_month_contract("NQ", date(2025, 3, 21))
+        assert result == "NQH25"
+
+    def test_december_front_month(self) -> None:
+        result = get_front_month_contract("ES", date(2024, 10, 1))
+        assert result == "ESZ24"
+
+    def test_year_boundary(self) -> None:
+        result = get_front_month_contract("ES", date(2024, 12, 25))
+        assert result == "ESH25"
+
+    def test_micro_contract(self) -> None:
+        result = get_front_month_contract("MNQ", date(2026, 3, 22))
+        assert result == "MNQM26"
+
+    def test_treasury(self) -> None:
+        result = get_front_month_contract("ZN", date(2025, 1, 15))
+        assert result == "ZNH25"
+
+    def test_metals(self) -> None:
+        result = get_front_month_contract("GC", date(2025, 1, 15))
+        assert result == "GCH25"
+
+    def test_defaults_to_today(self) -> None:
+        result = get_front_month_contract("NQ")
+        assert result.startswith("NQ")
+        assert is_supported_contract(result)
+
+    def test_unsupported_root_raises(self) -> None:
+        with pytest.raises(ValueError, match="not a supported futures root"):
+            get_front_month_contract("VX", date(2025, 3, 1))
+
+    def test_case_insensitive(self) -> None:
+        result1 = get_front_month_contract("nq", date(2025, 3, 1))
+        result2 = get_front_month_contract("NQ", date(2025, 3, 1))
+        assert result1 == result2

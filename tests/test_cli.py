@@ -245,6 +245,56 @@ class TestCliBatchDownload:
         assert "Batch download" in result.output
 
 
+class TestCliDownloadFrontMonth:
+    def test_bare_root_downloads_front_month(self) -> None:
+        """dbn download NQ -s ohlcv-1m should download front-month contract."""
+        runner = CliRunner()
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
+
+            result = runner.invoke(main, ["download", "NQ", "-s", "ohlcv-1m"])
+            assert result.exit_code == 0
+            assert "Front-month:" in result.output
+            assert "Successfully cached" in result.output
+            mock_cache.download.assert_called_once()
+            call_args = mock_cache.download.call_args
+            downloaded_symbol = (
+                call_args[0][0] if call_args[0] else call_args[1]["symbol"]
+            )
+            assert downloaded_symbol.startswith("NQ")
+            assert downloaded_symbol != "NQ"
+
+    def test_bare_root_unsupported_still_errors(self) -> None:
+        """Unsupported root without dates should still error."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["download", "VX", "-s", "ohlcv-1m"])
+        assert result.exit_code == 1
+        assert "--start and --end are required" in result.output
+
+    def test_bare_root_with_start_end_unchanged(self) -> None:
+        """Root with explicit dates works as before (no front-month)."""
+        runner = CliRunner()
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
+
+            result = runner.invoke(
+                main,
+                [
+                    "download",
+                    "NQ.c.0",
+                    "-s",
+                    "ohlcv-1m",
+                    "--start",
+                    "2024-01-01",
+                    "--end",
+                    "2024-06-30",
+                ],
+            )
+            assert result.exit_code == 0
+
+
 class TestCliList:
     def test_list_empty(self) -> None:
         runner = CliRunner()
@@ -322,7 +372,7 @@ class TestCliUpdate:
                     dataset="GLBX.MDP3",
                     symbol="ES.c.0",
                     schema="ohlcv-1m",
-                    ranges=[DateRange(start=date(2024, 1, 1), end=date.today())],
+                    ranges=[DateRange(start=date(2024, 1, 1), end=date(2099, 12, 31))],
                     size_bytes=1024,
                 )
             ]
@@ -461,3 +511,148 @@ class TestCliUpdate:
             result = runner.invoke(main, ["update", "ES.c.0"])
             assert result.exit_code == 1
             assert "No Cached Data" in result.output
+
+
+class TestCliUpdateAutoRoll:
+    def test_update_rolls_expired_contract(self) -> None:
+        """Expired contract should trigger download of successor."""
+        runner = CliRunner()
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            # MNQH26 expired on 2026-03-20, cached through expiration
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="MNQH26",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2025, 12, 6), end=date(2026, 3, 20))],
+                    size_bytes=1024,
+                ),
+            ]
+            mock_cache.get_update_range.return_value = None
+            mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
+
+            result = runner.invoke(main, ["update", "mnq"])
+            assert result.exit_code == 0
+            assert "MNQM26" in result.output
+
+    def test_update_no_roll_flag_skips_successor(self) -> None:
+        """--no-roll should skip successor download."""
+        runner = CliRunner()
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="MNQH26",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2025, 12, 6), end=date(2026, 3, 20))],
+                    size_bytes=1024,
+                ),
+            ]
+            mock_cache.get_update_range.return_value = None
+
+            result = runner.invoke(main, ["update", "mnq", "--no-roll"])
+            assert result.exit_code == 0
+            assert "MNQM26" not in result.output
+
+    def test_update_doesnt_roll_if_successor_already_cached(self) -> None:
+        """If successor is already cached, don't re-download."""
+        runner = CliRunner()
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="MNQH26",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2025, 12, 6), end=date(2026, 3, 20))],
+                    size_bytes=1024,
+                ),
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="MNQM26",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2026, 3, 6), end=date(2026, 3, 24))],
+                    size_bytes=2048,
+                ),
+            ]
+            mock_cache.get_update_range.return_value = None
+
+            result = runner.invoke(main, ["update", "mnq"])
+            assert result.exit_code == 0
+            mock_cache.download.assert_not_called()
+
+    def test_update_rolls_with_multiple_schemas(self) -> None:
+        """Successor should be downloaded for all schemas the expired contract had."""
+        runner = CliRunner()
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="NQH26",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2025, 12, 6), end=date(2026, 3, 20))],
+                    size_bytes=1024,
+                ),
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="NQH26",
+                    schema="ohlcv-1d",
+                    ranges=[DateRange(start=date(2025, 12, 6), end=date(2026, 3, 20))],
+                    size_bytes=512,
+                ),
+            ]
+            mock_cache.get_update_range.return_value = None
+            mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
+
+            result = runner.invoke(main, ["update", "nq"])
+            assert result.exit_code == 0
+            assert "NQM26" in result.output
+
+    def test_update_active_contract_not_rolled(self) -> None:
+        """Active contract cached up to date should NOT trigger auto-roll."""
+        runner = CliRunner()
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            # NQM26 expires June 2026 — still active, cached through yesterday
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="NQM26",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2026, 3, 6), end=date(2026, 3, 24))],
+                    size_bytes=1024,
+                ),
+            ]
+            mock_cache.get_update_range.return_value = None
+
+            result = runner.invoke(main, ["update", "nq"])
+            assert result.exit_code == 0
+            assert "NQU26" not in result.output
+            mock_cache.download.assert_not_called()
+
+    def test_update_continuous_not_rolled(self) -> None:
+        """Continuous contracts should not trigger auto-roll."""
+        runner = CliRunner()
+        with patch("dbn_cache.cache.DataCache") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.list_cached.return_value = [
+                CachedDataInfo(
+                    dataset="GLBX.MDP3",
+                    symbol="NQ.c.0",
+                    schema="ohlcv-1m",
+                    ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 6, 30))],
+                    size_bytes=1024,
+                ),
+            ]
+            mock_cache.get_update_range.return_value = (
+                date(2024, 7, 1),
+                date(2024, 12, 31),
+            )
+            mock_cache.download.return_value = CachedData([Path("/tmp/test.parquet")])
+
+            result = runner.invoke(main, ["update", "NQ.c.0"])
+            assert result.exit_code == 0
+            assert mock_cache.download.call_count == 1

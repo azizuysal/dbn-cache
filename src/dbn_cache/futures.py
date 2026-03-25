@@ -251,9 +251,9 @@ def generate_quarterly_contracts(
         raise ValueError(msg)
 
     if to_year is None:
-        from datetime import date as date_type
+        from .utils import utc_today
 
-        to_year = date_type.today().year
+        to_year = utc_today().year
 
     contracts: list[str] = []
     for year in range(from_year, to_year + 1):
@@ -436,6 +436,97 @@ def _previous_quarterly_month(month: int, year: int) -> tuple[int, int]:
                 return q, year
         # If month is before March, previous is December of last year
         return 12, year - 1
+
+
+def _next_quarterly_month(month: int, year: int) -> tuple[int, int]:
+    """Get the next quarterly contract month after the given month.
+
+    Quarterly months are March (H), June (M), September (U), December (Z).
+    Handles both quarterly and non-quarterly input months.
+
+    Args:
+        month: Current contract month (1-12)
+        year: Current contract year
+
+    Returns:
+        Tuple of (next_month, next_year)
+    """
+    for q in QUARTERLY_MONTHS:
+        if q > month:
+            return q, year
+    return 3, year + 1
+
+
+def get_next_contract(symbol: str) -> str:
+    """Get the next quarterly contract after the given one.
+
+    Args:
+        symbol: Futures contract symbol (e.g., "NQH25", "MNQH26")
+
+    Returns:
+        Next quarterly contract symbol (e.g., "NQM25", "MNQM26")
+
+    Raises:
+        ValueError: If symbol cannot be parsed or product is not supported.
+    """
+    root, month, year = parse_contract_symbol(symbol)
+    if root not in ALL_SUPPORTED_ROOTS:
+        msg = (
+            f"Cannot auto-detect next contract for {symbol}. "
+            f"{root} is not a supported product."
+        )
+        raise ValueError(msg)
+
+    next_month, next_year = _next_quarterly_month(month, year)
+    month_code = MONTH_TO_CODE[next_month]
+    year_suffix = next_year % 100
+    return f"{root}{month_code}{year_suffix:02d}"
+
+
+def get_front_month_contract(
+    root: str,
+    as_of: date | None = None,
+) -> str:
+    """Get the current front-month contract for a futures root.
+
+    The front month is the nearest quarterly contract that hasn't expired yet.
+
+    Args:
+        root: Futures root symbol (e.g., "NQ", "ES", "MNQ")
+        as_of: Reference date (defaults to today UTC)
+
+    Returns:
+        Front-month contract symbol (e.g., "NQM26")
+
+    Raises:
+        ValueError: If root is not a supported futures root.
+    """
+    root = root.upper()
+    if root not in ALL_SUPPORTED_ROOTS:
+        supported = sorted(ALL_SUPPORTED_ROOTS)
+        msg = f"'{root}' is not a supported futures root. Supported: {supported}"
+        raise ValueError(msg)
+
+    if as_of is None:
+        from .utils import utc_today
+
+        as_of = utc_today()
+
+    year = as_of.year
+    for offset_quarters in range(8):
+        quarter_idx = offset_quarters % 4
+        year_offset = offset_quarters // 4
+        month = QUARTERLY_MONTHS[quarter_idx]
+        check_year = year + year_offset
+
+        expiration = get_expiration_date(root, month, check_year)
+        if expiration >= as_of:
+            month_code = MONTH_TO_CODE[month]
+            year_suffix = check_year % 100
+            return f"{root}{month_code}{year_suffix:02d}"
+
+    msg = f"Could not determine front-month contract for {root}"
+    raise ValueError(msg)
 
 
 def get_contract_dates(

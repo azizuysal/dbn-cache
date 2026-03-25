@@ -68,6 +68,9 @@ def _import_futures() -> dict[str, Any]:
     from .futures import (
         generate_quarterly_contracts,
         get_contract_dates,
+        get_expiration_date,
+        get_front_month_contract,
+        get_next_contract,
         is_supported_contract,
         is_supported_root,
         parse_contract_symbol,
@@ -76,6 +79,9 @@ def _import_futures() -> dict[str, Any]:
     return {
         "generate_quarterly_contracts": generate_quarterly_contracts,
         "get_contract_dates": get_contract_dates,
+        "get_expiration_date": get_expiration_date,
+        "get_front_month_contract": get_front_month_contract,
+        "get_next_contract": get_next_contract,
         "is_supported_contract": is_supported_contract,
         "is_supported_root": is_supported_root,
         "parse_contract_symbol": parse_contract_symbol,
@@ -393,6 +399,11 @@ def download(
       dbn download NQH25 -s ohlcv-1m --rollover-days 7
 
     \b
+    Front-month contract (auto-detected):
+      dbn download NQ -s ohlcv-1m                     # Current front-month
+      dbn download MNQ -s ohlcv-1m                    # Micro front-month
+
+    \b
     Batch download (all quarterly contracts):
       dbn download NQ -s ohlcv-1m --from 2016           # 2016 to now
       dbn download NQ -s ohlcv-1m --from 2016 --to 2020 # 2016 to 2020
@@ -404,7 +415,7 @@ def download(
     \b
     Symbol formats:
       NQH25   = Specific contract (Mar 2025)
-      NQ      = Root symbol (use with --from for batch)
+      NQ      = Root symbol (front-month, or use with --from for batch)
       NQ.c.0  = Continuous futures (requires --start/--end)
     """
     # Lazy imports
@@ -443,10 +454,12 @@ def download(
             sys.exit(1)
 
         if not is_supported_root(symbol):
+            from .futures import ALL_SUPPORTED_ROOTS
+
+            supported_str = ", ".join(sorted(ALL_SUPPORTED_ROOTS))
             console.print(
                 f"[red]Error:[/red] '{symbol}' is not a supported futures root.\n"
-                "[dim]Supported roots: ES, NQ, RTY, YM, MES, MNQ, M2K, MYM, "
-                "ZB, ZN, ZF, ZT, UB, GC, SI, HG, PL, PA[/dim]"
+                f"[dim]Supported roots: {supported_str}[/dim]"
             )
             sys.exit(1)
 
@@ -502,11 +515,28 @@ def download(
             else:
                 end = expiration
                 console.print(f"[dim]Auto-detected: {start} to {end}[/dim]")
+        elif is_supported_root(symbol):
+            get_front_month = futures["get_front_month_contract"]
+            contract = get_front_month(symbol)
+            start, expiration = get_contract_dates(
+                contract, rollover_days=rollover_days
+            )
+            yesterday = utc_today() - timedelta(days=1)
+            if expiration > yesterday:
+                end = yesterday
+                console.print(
+                    f"[dim]Front-month: {contract} ({start} to {end}, "
+                    f"active contract, capped at yesterday)[/dim]"
+                )
+            else:
+                end = expiration
+                console.print(f"[dim]Front-month: {contract} ({start} to {end})[/dim]")
+            symbol = contract
         else:
             console.print(
                 "[red]Error:[/red] --start and --end are required for this symbol.\n"
                 "[dim]Date auto-detection only works for supported futures contracts "
-                "(e.g., NQH25).[/dim]"
+                "(e.g., NQH25) or roots (e.g., NQ).[/dim]"
             )
             sys.exit(1)
 
@@ -741,25 +771,39 @@ def _batch_download(
 @click.argument("symbol", required=False)
 @click.option("--schema", "-s", default=None, help="Schema to update (all if omitted)")
 @click.option("--all", "update_all", is_flag=True, help="Update all cached data")
-def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
+@click.option(
+    "--no-roll",
+    is_flag=True,
+    help="Don't auto-download successor contracts for expired futures",
+)
+def update(
+    symbol: str | None, schema: str | None, update_all: bool, no_roll: bool
+) -> None:
     """Update cached data to the latest available date.
 
     Downloads new data since the last update. Requires existing cached data.
     Dataset is inferred from the cached metadata. The end date is automatically
     clamped to the dataset's available range on Databento.
 
+    Expired futures contracts automatically trigger download of the successor
+    contract with the same schemas. Use --no-roll to disable this.
+
     \b
     Examples:
       dbn update ES.c.0              # Update all schemas for symbol
       dbn update ES.c.0 -s ohlcv-1m  # Update specific schema
+      dbn update mnq                 # Update + auto-roll expired contracts
       dbn update --all               # Update everything in cache
+      dbn update --all --no-roll     # Update without auto-rolling
     """
     # Lazy imports
     DataCache = _import_cache()
     utils = _import_utils()
+    futures = _import_futures()
 
     filter_by_symbol_prefix = utils["filter_by_symbol_prefix"]
     has_lookahead_bias = utils["has_lookahead_bias"]
+    utc_today = utils["utc_today"]
 
     if not symbol and not update_all:
         console.print("[red]Error:[/red] Either provide a SYMBOL or use --all flag")
@@ -787,7 +831,8 @@ def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
     if update_all:
         matches = all_cached
     else:
-        symbol = _canonicalize_symbol(symbol)  # type: ignore[arg-type]
+        assert symbol is not None
+        symbol = _canonicalize_symbol(symbol)
         matches = filter_by_symbol_prefix(all_cached, symbol)
         if schema:
             matches = [m for m in matches if m.schema_ == schema]
@@ -855,11 +900,81 @@ def update(symbol: str | None, schema: str | None, update_all: bool) -> None:
     except KeyboardInterrupt:
         cancelled = True
 
+    # Auto-roll: detect expired contracts and download successors
+    rolled_count = 0
+    if not no_roll and not cancelled:
+        get_next_contract = futures["get_next_contract"]
+        get_contract_dates_fn = futures["get_contract_dates"]
+        is_supported_contract = futures["is_supported_contract"]
+        parse_contract_symbol = futures["parse_contract_symbol"]
+        get_expiration_date_fn = futures["get_expiration_date"]
+
+        expired_contracts: dict[str, list[str]] = {}
+
+        for item in matches:
+            if not is_supported_contract(item.symbol):
+                continue
+
+            try:
+                root, month, year = parse_contract_symbol(item.symbol)
+                expiration = get_expiration_date_fn(root, month, year)
+            except ValueError:
+                continue
+
+            last_cached = item.ranges[-1].end if item.ranges else None
+            if last_cached is None or last_cached < expiration:
+                continue
+
+            try:
+                successor = get_next_contract(item.symbol)
+            except ValueError:
+                continue
+
+            successor_cached = any(
+                c.symbol == successor and c.schema_ == item.schema_ for c in all_cached
+            )
+            if successor_cached:
+                continue
+
+            if successor not in expired_contracts:
+                expired_contracts[successor] = []
+            if item.schema_ not in expired_contracts[successor]:
+                expired_contracts[successor].append(item.schema_)
+
+        for successor, schemas in sorted(expired_contracts.items()):
+            try:
+                start, expiration = get_contract_dates_fn(successor)
+                yesterday = utc_today() - timedelta(days=1)
+                end = min(expiration, yesterday)
+                if start > end:
+                    continue
+
+                for schema_name in schemas:
+                    console.print(
+                        f"Rolling → downloading [cyan]{successor}[/cyan]/"
+                        f"[blue]{schema_name}[/blue] ({start} to {end})"
+                    )
+                    try:
+                        _do_download(
+                            cache, successor, schema_name, start, end, "GLBX.MDP3"
+                        )
+                        rolled_count += 1
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        error_count += 1
+                        errors.append((successor, schema_name, str(e)))
+                        console.print(f"  [red]✗ Failed: {e}[/red]")
+            except ValueError:
+                continue
+
     console.print()
     if cancelled:
         console.print("[yellow]Cancelled[/yellow]")
     if updated_count > 0:
         console.print(f"[green]✓ Updated {updated_count} item(s)[/green]")
+    if rolled_count > 0:
+        console.print(f"[green]✓ Rolled {rolled_count} successor contract(s)[/green]")
     if up_to_date_count > 0:
         console.print(f"[green]✓ {up_to_date_count} item(s) already up to date[/green]")
     if error_count > 0:
@@ -877,9 +992,9 @@ def _format_size(size_bytes: int) -> str:
     """Format size in human-readable units."""
     if size_bytes >= 1024 * 1024 * 1024:
         return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
-    elif size_bytes >= 1024 * 1024:
+    if size_bytes >= 1024 * 1024:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
-    elif size_bytes >= 1024:
+    if size_bytes >= 1024:
         return f"{size_bytes / 1024:.1f} KB"
     return f"{size_bytes} B"
 
@@ -1329,6 +1444,7 @@ DATASETS: dict[str, str] = {
     "GLBX.MDP3": "CME Globex futures and options",
     "OPRA.PILLAR": "US options (all exchanges)",
     "IFEU.IMPACT": "ICE Futures Europe",
+    "IFLL.IMPACT": "ICE Futures London",
     "IFUS.IMPACT": "ICE Futures US",
     "NDEX.IMPACT": "Nodal Exchange power futures",
     "XEUR.EOBI": "Eurex fixed income and index derivatives",

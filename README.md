@@ -55,6 +55,10 @@ dbn download ES.c.0 --schema ohlcv-1m --start 2024-01-01 --end 2024-12-01
 # Download specific contract (dates auto-detected for supported futures)
 dbn download NQH25 --schema ohlcv-1m
 
+# Download current front-month contract (auto-detected)
+dbn download NQ --schema ohlcv-1m
+dbn download MNQ --schema ohlcv-1m
+
 # Batch download all quarterly contracts for a root symbol
 dbn download NQ --schema ohlcv-1m --from 2016              # 2016 to present
 dbn download NQ --schema ohlcv-1m --from 2016 --to 2020    # 2016 to 2020
@@ -68,7 +72,9 @@ dbn download AAPL --schema trades --start 2024-01-01 --end 2024-01-31 -d XNAS.IT
 # Update cached data to latest available (data has ~24h embargo)
 dbn update ES.c.0                # Update all schemas for symbol
 dbn update ES.c.0 -s ohlcv-1m    # Update specific schema
+dbn update mnq                   # Update + auto-roll expired contracts
 dbn update --all                  # Update everything in cache
+dbn update --all --no-roll        # Update without auto-rolling
 
 # List cached data (table view with quality indicators)
 dbn list                    # All cached data
@@ -106,6 +112,31 @@ dbn download NQH25 --schema ohlcv-1m --rollover-days 7
 dbn download NQH25 --schema ohlcv-1m --start 2024-12-01 --end 2025-03-21
 ```
 
+### Front-Month Download
+
+When given a bare root symbol (no `--from`, no `--start/--end`), the CLI automatically resolves it to the current front-month contract:
+
+```bash
+dbn download NQ --schema ohlcv-1m
+# → Resolves to NQM26 (or whichever contract is currently active)
+# → Dates auto-detected from rollover through expiration
+
+dbn download MNQ --schema ohlcv-1m
+# → Resolves to MNQM26
+```
+
+### Auto-Roll on Update
+
+When updating cached data, expired futures contracts automatically trigger download of the successor contract with the same schemas:
+
+```bash
+# MNQH26 expired → automatically downloads MNQM26 with same schemas
+dbn update mnq
+
+# Disable auto-roll
+dbn update mnq --no-roll
+```
+
 ### Batch Download
 
 Download all quarterly contracts for a root symbol over a year range:
@@ -140,7 +171,7 @@ Always use 2-digit years (e.g., `NQH25`, not `NQH5`).
 - **End:** Contract expiration date
 - **Start:** Previous quarterly contract expiration minus rollover buffer
 
-For other symbols (stocks, continuous futures, unsupported products), `--start` and `--end` remain required.
+For other symbols (stocks, continuous futures, unsupported products), `--start` and `--end` are required.
 
 ### Shell Completions
 
@@ -182,6 +213,11 @@ data = cache.download("NQH25", "ohlcv-1m", rollover_days=7)  # Custom buffer
 # Get contract dates directly
 start, end = get_contract_dates("NQH25", rollover_days=14)
 # → (date(2024, 12, 6), date(2025, 3, 21))
+
+# Get current front-month contract
+from dbn_cache import get_front_month_contract, get_next_contract
+front = get_front_month_contract("NQ")  # e.g., "NQM26"
+successor = get_next_contract("NQH26")  # "NQM26"
 
 # Generate all quarterly contracts for batch download
 from dbn_cache import generate_quarterly_contracts

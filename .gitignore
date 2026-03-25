@@ -218,6 +218,7 @@ __marimo__/
 # AI
 .claude
 CLAUDE.md
+docs/
 
 # Snyk Security Extension - AI Rules (auto-generated)
 .github/instructions/snyk_rules.instructions.md

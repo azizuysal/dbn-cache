@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -50,8 +51,6 @@ class TestDataCacheGet:
             ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 1, 31))],
             updated_at=datetime.now(),
         )
-        import json
-
         with meta_path.open("w") as f:
             json.dump(meta.model_dump(by_alias=True), f, default=str)
 
@@ -76,8 +75,6 @@ class TestDataCacheGet:
             ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 1, 31))],
             updated_at=datetime.now(),
         )
-        import json
-
         with meta_path.open("w") as f:
             json.dump(meta.model_dump(by_alias=True), f, default=str)
 
@@ -109,8 +106,6 @@ class TestDataCacheInfo:
             ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 1, 31))],
             updated_at=datetime.now(),
         )
-        import json
-
         with meta_path.open("w") as f:
             json.dump(meta.model_dump(by_alias=True), f, default=str)
 
@@ -141,8 +136,6 @@ class TestDataCacheListCached:
             ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 1, 31))],
             updated_at=datetime.now(),
         )
-        import json
-
         with meta_path.open("w") as f:
             json.dump(meta.model_dump(by_alias=True), f, default=str)
 
@@ -172,11 +165,9 @@ class TestDataCacheUpdate:
             symbol="ES.c.0",
             stype="continuous",
             schema="ohlcv-1m",
-            ranges=[DateRange(start=date(2024, 1, 1), end=date.today())],
+            ranges=[DateRange(start=date(2024, 1, 1), end=date(2099, 12, 31))],
             updated_at=datetime.now(),
         )
-        import json
-
         with meta_path.open("w") as f:
             json.dump(meta.model_dump(by_alias=True), f, default=str)
 
@@ -204,14 +195,79 @@ class TestDataCacheUpdate:
             ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 3, 15))],
             updated_at=datetime.now(),
         )
-        import json
-
         with meta_path.open("w") as f:
             json.dump(meta.model_dump(by_alias=True), f, default=str)
 
         # Should return None since contract is expired and fully cached
         result = cache.update("NQH24", "ohlcv-1d")
         assert result is None
+
+
+class TestClearCacheMetadata:
+    """Test clear_cache correctly adjusts metadata date ranges."""
+
+    def test_clear_middle_splits_range(self, tmp_path: Path) -> None:
+        """Clearing a subrange should split metadata into two non-overlapping ranges."""
+        cache = DataCache(cache_dir=tmp_path)
+
+        base_path = tmp_path / "GLBX.MDP3" / "ES_c_0" / "ohlcv-1m"
+        base_path.mkdir(parents=True)
+        (base_path / "2024").mkdir()
+        for m in range(1, 7):
+            df = pl.DataFrame({"ts": [1, 2, 3]})
+            df.write_parquet(base_path / "2024" / f"{m:02d}.parquet")
+
+        meta_path = base_path / "meta.json"
+        meta = SymbolMeta(
+            dataset="GLBX.MDP3",
+            symbol="ES.c.0",
+            stype="continuous",
+            schema="ohlcv-1m",
+            ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 6, 30))],
+            updated_at=datetime.now(),
+        )
+        with meta_path.open("w") as f:
+            json.dump(meta.model_dump(by_alias=True), f, default=str)
+
+        cache.clear_cache("ES.c.0", "ohlcv-1m", date(2024, 3, 1), date(2024, 4, 30))
+
+        with meta_path.open() as f:
+            updated = json.load(f)
+        ranges = updated["ranges"]
+        assert len(ranges) == 2
+        assert ranges[0]["end"] == "2024-02-29"
+        assert ranges[1]["start"] == "2024-05-01"
+
+    def test_clear_start_trims_range(self, tmp_path: Path) -> None:
+        """Clearing from the start should trim the beginning of the range."""
+        cache = DataCache(cache_dir=tmp_path)
+
+        base_path = tmp_path / "GLBX.MDP3" / "ES_c_0" / "ohlcv-1m"
+        base_path.mkdir(parents=True)
+        (base_path / "2024").mkdir()
+        for m in range(1, 4):
+            df = pl.DataFrame({"ts": [1, 2, 3]})
+            df.write_parquet(base_path / "2024" / f"{m:02d}.parquet")
+
+        meta_path = base_path / "meta.json"
+        meta = SymbolMeta(
+            dataset="GLBX.MDP3",
+            symbol="ES.c.0",
+            stype="continuous",
+            schema="ohlcv-1m",
+            ranges=[DateRange(start=date(2024, 1, 1), end=date(2024, 3, 31))],
+            updated_at=datetime.now(),
+        )
+        with meta_path.open("w") as f:
+            json.dump(meta.model_dump(by_alias=True), f, default=str)
+
+        cache.clear_cache("ES.c.0", "ohlcv-1m", date(2024, 1, 1), date(2024, 1, 31))
+
+        with meta_path.open() as f:
+            updated = json.load(f)
+        ranges = updated["ranges"]
+        assert len(ranges) == 1
+        assert ranges[0]["start"] == "2024-02-01"
 
 
 class TestGetUpdateRangeExpiredContracts:
@@ -408,11 +464,9 @@ class TestDataCacheUpdateAll:
             symbol="ES.c.0",
             stype="continuous",
             schema="ohlcv-1m",
-            ranges=[DateRange(start=date(2024, 1, 1), end=date.today())],
+            ranges=[DateRange(start=date(2024, 1, 1), end=date(2099, 12, 31))],
             updated_at=datetime.now(),
         )
-        import json
-
         with meta_path.open("w") as f:
             json.dump(meta.model_dump(by_alias=True), f, default=str)
 

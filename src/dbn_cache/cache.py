@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import warnings
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -108,10 +108,12 @@ def _get_actual_date_range(parquet_path: Path) -> tuple[date, date] | None:
     if ts_col is None:
         return None
 
-    # Check if column is a datetime type
     col_type = schema[ts_col]
-    if not (col_type == pl.Datetime or str(col_type).startswith("Datetime")):
-        return None  # Skip if not a datetime column (e.g., test data with int)
+    is_datetime = col_type == pl.Datetime or str(col_type).startswith("Datetime")
+    is_int = col_type == pl.Int64 or col_type == pl.UInt64
+
+    if not is_datetime and not is_int:
+        return None
 
     result = df.select(
         pl.col(ts_col).min().alias("min_ts"),
@@ -127,9 +129,13 @@ def _get_actual_date_range(parquet_path: Path) -> tuple[date, date] | None:
     if min_ts is None or max_ts is None:
         return None
 
-    # Convert to date (timestamps are in UTC)
-    start_date = min_ts.date()
-    end_date = max_ts.date()
+    if is_datetime:
+        start_date = min_ts.date()
+        end_date = max_ts.date()
+    else:
+        # Int64/UInt64: nanoseconds since UNIX epoch (Databento format)
+        start_date = datetime.fromtimestamp(min_ts / 1e9, tz=UTC).date()
+        end_date = datetime.fromtimestamp(max_ts / 1e9, tz=UTC).date()
 
     return start_date, end_date
 
@@ -182,6 +188,11 @@ class DataCache:
             self._available_end_cache[dataset] = inclusive_end
             return inclusive_end
         except Exception:
+            logger.warning(
+                "Failed to get available data range for %s",
+                dataset,
+                exc_info=True,
+            )
             return None
 
     def _get_symbol_path(self, dataset: str, symbol: str, schema: str) -> Path:
@@ -259,7 +270,18 @@ class DataCache:
 
         # Check if metadata matches actual data
         if not meta.ranges:
-            return None
+            # Metadata has no ranges but files exist — needs fix
+            return SymbolMeta(
+                dataset=meta.dataset,
+                symbol=meta.symbol,
+                stype=meta.stype,
+                schema=meta.schema_,
+                ranges=[DateRange(start=all_min, end=all_max)],
+                updated_at=datetime.now(UTC),
+                cache_version=meta.cache_version,
+                contract_specs=meta.contract_specs,
+                quality_issues=meta.quality_issues,
+            )
 
         meta_start = meta.ranges[0].start
         meta_end = meta.ranges[-1].end
@@ -275,7 +297,7 @@ class DataCache:
             stype=meta.stype,
             schema=meta.schema_,
             ranges=[DateRange(start=all_min, end=all_max)],
-            updated_at=datetime.now(),
+            updated_at=datetime.now(UTC),
             cache_version=meta.cache_version,
             contract_specs=meta.contract_specs,
             quality_issues=meta.quality_issues,
@@ -329,7 +351,7 @@ class DataCache:
             stype=detect_stype(original_symbol),
             schema=schema,
             ranges=[DateRange(start=all_min, end=all_max)],
-            updated_at=datetime.now(),
+            updated_at=datetime.now(UTC),
         )
 
     def _merge_ranges(self, ranges: list[DateRange]) -> list[DateRange]:
@@ -558,12 +580,20 @@ class DataCache:
                     if r.end < start or r.start > end:
                         remaining_ranges.append(r)
                     elif r.start < start and r.end > end:
-                        remaining_ranges.append(DateRange(start=r.start, end=start))
-                        remaining_ranges.append(DateRange(start=end, end=r.end))
+                        remaining_ranges.append(
+                            DateRange(start=r.start, end=start - timedelta(days=1))
+                        )
+                        remaining_ranges.append(
+                            DateRange(start=end + timedelta(days=1), end=r.end)
+                        )
                     elif r.start < start:
-                        remaining_ranges.append(DateRange(start=r.start, end=start))
+                        remaining_ranges.append(
+                            DateRange(start=r.start, end=start - timedelta(days=1))
+                        )
                     elif r.end > end:
-                        remaining_ranges.append(DateRange(start=end, end=r.end))
+                        remaining_ranges.append(
+                            DateRange(start=end + timedelta(days=1), end=r.end)
+                        )
 
                 if remaining_ranges:
                     meta.ranges = self._merge_ranges(remaining_ranges)
@@ -652,7 +682,7 @@ class DataCache:
             stype=detect_stype(symbol),
             schema=schema,
             ranges=self._merge_ranges(cached_ranges),
-            updated_at=datetime.now(),
+            updated_at=datetime.now(UTC),
         )
         self._save_meta(new_meta)
 
@@ -1143,6 +1173,7 @@ class DataCache:
             schema=schema,
             ranges=meta.ranges,
             size_bytes=size,
+            quality_issues=meta.quality_issues,
         )
 
     def validate_metadata(
